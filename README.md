@@ -48,10 +48,17 @@ Copy `.env.example` to `.env` and fill in real values locally. **Never commit `.
 
 ## Repository layout
 
+Directory groups mirror runtime boundaries — see `docs/adr/0004`.
+
 ```
-apps/       control-plane, integration-plane, worker, oms-web
-packages/   contracts, channel-sdk, tenant-client, secrets, connector-*
-docs/       ARCHITECTURE.md, PLAN.md, adr/
+apps/
+  services/     control-plane, integration-plane, worker   (backend runtimes)
+  web/          oms-web, ops-console                       (browser-bundled)
+packages/       contracts, channel-sdk, tenant-client, secrets   (stable libraries)
+connectors/     one workspace per marketplace channel           (adapters)
+data-plane/     Medusa config + custom modules, runs inside each tenant instance
+tooling/        boundaries checker, tsconfig, eslint-config
+docs/           ARCHITECTURE.md, PLAN.md, adr/
 ```
 
 ## Contributing

@@ -10,19 +10,19 @@ Companion documents: `AGENTS.md` (working contract), `docs/PLAN.md` (milestones)
                     |                                    ^
                     v                                    |
         +-------------------------------------+          |
-        |   apps/oms-web  (Next.js)           |          |
-        |   seller & ops UI                   |          |
+        |   apps/web/oms-web    (Next.js)     |          |
+        |   apps/web/ops-console (internal)   |          |
         +------------------+------------------+          |
                            | HTTP                        |
         +------------------v------------------+          |
-        |   apps/control-plane                |          |
+        |   apps/services/control-plane       |          |
         |   tenant registry, auth, RBAC,      |          |
         |   billing, provisioning,            |          |
         |   channel config + credentials      |          |
         +------------------+------------------+          |
                            | provisioning API            |
         +------------------v------------------+          |
-        |   apps/integration-plane            |          |
+        |   apps/services/integration-plane   |          |
         |   connectors, webhooks, rate limit  |----------+
         |   governor, OAuth callbacks         |
         +------------------+------------------+
@@ -36,15 +36,19 @@ Companion documents: `AGENTS.md` (working contract), `docs/PLAN.md` (milestones)
                            ^
                            | workflows
         +------------------+------------------+
-        |   apps/worker                       |
+        |   apps/services/worker              |
         |   sync jobs, reconciliation         |
         |   Redis workflow engine             |
         +-------------------------------------+
 ```
 
+Code in `data-plane/` runs inside each tenant's Medusa instance (custom modules registered via
+module links). `connectors/` are bundled into `integration-plane` and `worker`, never deployed
+alone. `tooling/` is never shipped.
+
 ## 2. Layers and responsibilities
 
-### Control plane (`apps/control-plane`)
+### Control plane (`apps/services/control-plane`)
 
 Owns everything about *who the tenant is*, not *what they sell*.
 
@@ -57,11 +61,11 @@ Owns everything about *who the tenant is*, not *what they sell*.
 
 **Never** stores product, order, or stock data. Those live in the tenant data plane.
 
-### Integration plane (`apps/integration-plane`)
+### Integration plane (`apps/services/integration-plane`)
 
 Owns everything about *talking to the outside world*.
 
-- Connectors (via `packages/connector-*`) implementing `packages/channel-sdk`.
+- Connectors (via `connectors/*`) implementing `packages/channel-sdk`.
 - Webhook receivers: verify signature, persist raw event, enqueue, return. Nothing else.
 - OAuth authorization and callback handling.
 - Rate-limit governor: global scheduling per app key and per seller.
@@ -69,7 +73,7 @@ Owns everything about *talking to the outside world*.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
 
-### Worker (`apps/worker`)
+### Worker (`apps/services/worker`)
 
 Owns *executing work over time*.
 
@@ -171,24 +175,42 @@ Full rationale and accepted trade-offs: `docs/adr/0001`.
 
 ```
 apps/
-  control-plane/
-  integration-plane/
-  worker/
-  oms-web/
-packages/
+  services/                 # long-running backend runtimes we deploy
+    control-plane/
+    integration-plane/
+    worker/
+  web/                      # browser-bundled runtimes we deploy
+    oms-web/                # seller-facing
+    ops-console/            # internal operator-facing
+packages/                   # stable shared libraries — few, slow to change
   contracts/
   channel-sdk/
   tenant-client/
   secrets/
-  connector-shopee/
-  connector-tiktok-tokopedia/
-  connector-lazada/
+connectors/                 # adapters — volatile, one package per channel
+  tiktok-tokopedia/
+  shopee/                   # planned (M8)
+  lazada/                   # planned (M8)
+data-plane/                 # runs INSIDE each tenant's Medusa instance
+  medusa-config/
+  modules/
+    wms/
+    purchase-order/
+    channel-order-link/
+tooling/                    # repo tooling, never shipped
+  boundaries/
+  tsconfig/
+  eslint-config/
 docs/
   ARCHITECTURE.md
   PLAN.md
   adr/
 AGENTS.md
 ```
+
+The three groupings are deliberate: `apps/` is split by runtime, `connectors/` is separated from
+`packages/` by volatility, and `data-plane/` is top-level because it runs under Medusa rather than
+under our services. Rationale and rejected alternatives: `docs/adr/0004`.
 
 ## 6. What we explicitly do not build (for now)
 

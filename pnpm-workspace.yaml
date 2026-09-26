@@ -1,0 +1,10 @@
+# Workspace globs mirror the runtime boundaries in docs/adr/0004.
+# Grouping is intentional: see that ADR before changing these patterns.
+packages:
+  - "apps/services/*"
+  - "apps/web/*"
+  - "packages/*"
+  - "connectors/*"
+  - "data-plane/modules/*"
+  - "data-plane/medusa-config"
+  - "tooling/*"

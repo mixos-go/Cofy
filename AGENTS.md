@@ -52,24 +52,38 @@ consequence, not just a stylistic preference.
 
 ## 3. Layer map and dependency direction
 
+Directory groups mirror runtime boundaries. Full rationale: `docs/adr/0004`.
+
 ```
-apps/control-plane        ->  packages/*   (tenant registry, auth, billing, provisioning)
-apps/integration-plane    ->  packages/*   (marketplace connectors, webhooks, rate limiting)
-apps/worker               ->  packages/*   (sync jobs, reconciliation)
-apps/oms-web              ->  packages/*   (seller/ops UI, consumes our own API)
+apps/services/*           ->  packages/*, connectors/*   (we deploy these)
+  control-plane               tenant registry, auth, billing, provisioning
+  integration-plane           webhooks, OAuth, rate governor
+  worker                      workflows, reconciliation
+
+apps/web/*                ->  packages/*                 (browser-bundled, we deploy these)
+  oms-web                     seller-facing UI
+  ops-console                 internal operator UI
+
+connectors/*              ->  packages/channel-sdk, packages/contracts
+packages/channel-sdk      ->  packages/contracts
+packages/tenant-client    ->  packages/contracts
+packages/secrets          ->  packages/contracts
 packages/contracts        ->  (IMPORTS NOTHING)
-packages/channel-sdk      ->  contracts
-packages/tenant-client    ->  contracts
-packages/secrets          ->  contracts
+
+data-plane/*              ->  (runs INSIDE the tenant's Medusa instance, not in our services)
 ```
 
 Enforced rules:
 
-- **Direction is downward only.** `contracts` knows nothing. `channel-sdk` knows `contracts` only.
+- **Direction is downward only.** `contracts` knows nothing. A connector knows `channel-sdk` and
+  `contracts` only.
 - **`apps/*` must not import each other.** Apps communicate over HTTP/queue, never via import.
   If you need to share code between apps, it belongs in `packages/`.
+- **`apps/web/*` must never be imported by `apps/services/*`**, and vice versa.
 - **`integration-plane` must not know the tenant database schema.** It knows `tenant-client` and
   `channel-sdk` only.
+- **`data-plane/*` must not import from `apps/`, `packages/`, or `connectors/`.** It runs under
+  Medusa inside the tenant instance and may depend only on Medusa's own packages.
 - Each package has its own `package.json` with explicit `exports`. No deep imports into internal
   files (`../../src/internal/foo`).
 
@@ -83,7 +97,7 @@ the checker.
 This is the **most frequently repeated** pattern. Every new connector MUST follow the same shape
 so it can be tested, rate-limited, and reconciled uniformly.
 
-Each connector is a single package `packages/connector-<name>/` implementing the interface from
+Each connector is a single workspace `connectors/<name>/` implementing the interface from
 `packages/channel-sdk`:
 
 ```ts

@@ -21,7 +21,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Not started | M1 |
 | M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
-| M5 | Seller OMS UI | Not started | M3 |
+| M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | Not started | M4 |
@@ -35,12 +35,16 @@ codebase, before any business logic exists.
 
 **Deliverables**
 
-- Monorepo with pnpm workspaces, TypeScript strict, shared tsconfig.
-- Empty packages with declared `exports`: `contracts`, `channel-sdk`, `tenant-client`, `secrets`.
+- Monorepo with pnpm workspaces grouped per `docs/adr/0004`: `apps/services/*`, `apps/web/*`,
+  `packages/*`, `connectors/*`, `data-plane/*`, `tooling/*`.
+- TypeScript strict, shared tsconfig, path aliases.
+- Empty workspaces with declared `exports`: `contracts`, `channel-sdk`, `tenant-client`, `secrets`.
+  `connectors/tiktok-tokopedia`, `data-plane/modules/*`, and `apps/web/ops-console` exist as
+  reserved boundaries and stay empty until their milestone.
 - `pnpm boundaries` checker enforcing: dependency direction, no Medusa core imports outside the
-  data plane, no direct DB access from `integration-plane`/`worker`.
+  data plane, no direct DB access from `apps/services/integration-plane`/`apps/services/worker`.
 - CI running `pnpm check` + `pnpm boundaries` on every PR.
-- `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `docs/adr/0000-0003`.
+- `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `docs/adr/0000-0004`.
 - `.env.example` listing required variable names with no real values.
 - `docker-compose.yml` for local Postgres + Redis.
 - PR template that requires: milestone reference, `pnpm check` result, and dependency
@@ -97,7 +101,7 @@ are mechanical.
 
 - `packages/channel-sdk` frozen: `ChannelConnector` interface, capability declarations, error
   taxonomy (including rate-limit errors), cursor types.
-- `packages/connector-tiktok-tokopedia` implementing it, handling the two-API reality:
+- `connectors/tiktok-tokopedia` implementing it, handling the two-API reality:
   - account and app binding between TikTok Shop Partner Center and Tokopedia Open Platform;
   - order/bill history read from Tokopedia, current operations via TikTok Shop APIs;
   - OAuth authorize + credential refresh.
@@ -179,18 +183,22 @@ and stock propagates back without overselling.
 
 ---
 
-## M5 — Seller OMS UI
+## M5 — Seller OMS UI & operator console
 
-**Goal.** Sellers can actually run their operations. Until now everything was API-only.
+**Goal.** Sellers can actually run their operations, and our own team can support them. Until now
+everything was API-only.
 
 **Deliverables**
 
-- `apps/oms-web`: Next.js app consuming our own APIs (not Medusa Admin).
+- `apps/web/oms-web`: Next.js app consuming our own APIs (not Medusa Admin).
 - Channel connection flow (the single-click OAuth promise) with clear connection health.
 - Order list/detail with channel source, status, and manual actions (accept, cancel, reship).
 - Stock view per location, with sync status per channel.
 - Sync health view: what is syncing, what failed, what reconciliation fixed.
 - Tenant-scoped auth and RBAC enforced at the API layer, not just hidden in the UI.
+- `apps/web/ops-console`: internal operator UI — tenant lifecycle, support impersonation (audited
+  and time-boxed), and usage/billing views. Separate app from the start so operator screens never
+  leak into the seller UI.
 
 **Exit criteria**
 
@@ -198,6 +206,8 @@ and stock propagates back without overselling.
 - [ ] Failed syncs are visible with an actionable explanation, not a raw error.
 - [ ] Tenant isolation test: tenant A cannot see tenant B orders through any UI endpoint.
 - [ ] Every UI action maps to an audited API call (no client-side-only state changes).
+- [ ] Operator role is distinct from seller roles; ops-console endpoints reject seller credentials.
+- [ ] Impersonation is logged with actor, target tenant, and expiry.
 
 **Non-goals**
 
@@ -211,12 +221,12 @@ and stock propagates back without overselling.
 
 **Deliverables**
 
-- Custom modules inside the tenant instance (via module links, never core table changes):
+- Custom modules under `data-plane/modules/` (via module links, never core table changes):
   `wms` (bin locations, put-away, pick tasks, pack, stocktake) and `purchase-order` (inbound).
+- WMS screens in `apps/web/oms-web`.
 - Inbound flow: purchase order → goods receipt → put-away → stock available.
 - Outbound flow: order → pick task (with barcode scan) → pack → handover to fulfillment.
 - Stock adjustment and stocktake with variance reporting.
-- WMS UI in `oms-web`.
 
 **Exit criteria**
 
@@ -264,7 +274,7 @@ and stock propagates back without overselling.
 
 **Deliverables**
 
-- `packages/connector-shopee`, `packages/connector-lazada` following M2's shape exactly.
+- `connectors/shopee`, `connectors/lazada` following M2's shape exactly.
 - Per-channel capability matrix visible to sellers.
 - Channel-specific quirks documented in each connector, not in shared code.
 
