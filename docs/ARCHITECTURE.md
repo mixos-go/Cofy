@@ -107,6 +107,7 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 | `packages/tenant-client` | The only allowed path to tenant data | `contracts` |
 | `packages/secrets` | KMS-backed secret access, and the typed `CredentialStore` over it | `contracts` |
 | `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
+| `packages/rate-governor` | Central marketplace rate-limit scheduling: one budget per app key, one per seller | `contracts` |
 
 ## 3. Key flows
 

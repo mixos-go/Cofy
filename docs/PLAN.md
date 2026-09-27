@@ -19,8 +19,8 @@ This file is the **single source of truth for what we are building next**.
 | M0 | Repo foundation & guardrails | Done (CI enforcement pending first PR) | — |
 | M1 | Tenant provisioning (control plane) | Done | M0 |
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
-| E0 | Integration plane prerequisites | In progress (service + credentials done; fixed egress IP pending) | M2 |
-| M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2, E0 |
+| E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
+| M3 | Order import & stock sync (one channel, end-to-end) | In progress (governor done; contract + write-path ADRs await approval) | M2, E0 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
@@ -260,16 +260,17 @@ allowlist**, and the integration plane that would make calls **does not exist ye
 
 **Open decisions (need a human call before M3 starts)**
 
-- **Egress strategy.** A NAT gateway with a static IP, or a reserved VM IP? One shared egress for
-  all tenants, or per-tenant? This decides the rate-limit governor's budget shape (ADR 0002 wants a
-  budget *per app key and per seller*) and whether one tenant can exhaust another's quota.
-- **Medusa fork question.** The repository has already decided **no fork** (ADR 0001: one vanilla
-  Medusa instance per tenant, no core-table changes, custom modules in `data-plane/`). If that is
-  still open at the platform level, it must be settled now — M3 is the first milestone that writes
-  into Medusa, and the answer changes M3's shape entirely. The plan below assumes the ADR stands.
-- **Where the product catalogue lives.** Stock push maps a local variant to a channel `sku_id`, so
-  the platform needs one authoritative catalogue. The assumption here is Medusa's product module in
-  the tenant data plane; if the intent is a platform-level catalogue instead, that is an ADR.
+- **Egress strategy (still open).** A NAT gateway with a static IP, or a reserved VM IP? One shared
+  egress for all tenants, or per-tenant? This decides the rate-limit governor's budget shape
+  (ADR 0002 wants a budget *per app key and per seller*) and whether one tenant can exhaust
+  another's quota. **This is the one open E0 item; the governor in M3 was built to be correct
+  either way — a shared egress needs the app-key budget, a per-tenant egress would add a
+  per-tenant app budget alongside it.**
+- **Medusa fork question.** Settled: **no fork** (ADR 0001). M3's write path is built to keep this
+  literally true — see ADR 0010 for how the worker reaches Medusa without importing it.
+- **Where the product catalogue lives.** Assumed to be Medusa's product module in the tenant data
+  plane. ADR 0009 depends on this: the mapping from our SKU to a channel variant is keyed by our
+  SKU, whichever store owns the catalogue.
 
 ---
 
@@ -277,6 +278,16 @@ allowlist**, and the integration plane that would make calls **does not exist ye
 
 **Goal.** The core promise: an order from a marketplace lands in the tenant's Medusa correctly,
 and stock propagates back without overselling.
+
+**Progress**
+
+- Rate-limit governor: **done** — `packages/rate-governor`, 12 tests with a fake clock (shared
+  app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown).
+- Connector listing read (required before stock push): **designed, awaiting approval** — ADR 0009.
+- Sync state location and commerce write path: **designed, awaiting approval** — ADR 0010.
+- Order import, listing import, stock push, `data-plane/modules/channel-order-link`: not started,
+  blocked on the two ADRs above (both are `AGENTS.md` §8 stop-and-ask items: a frozen shared
+  interface, and tenant data access).
 
 **Deliverables**
 
@@ -307,7 +318,20 @@ and stock propagates back without overselling.
 - [ ] Concurrent orders across channels never oversell (prove with a concurrency test).
 - [ ] Compensation test: fail the workflow after order creation, assert reservation is released
       and no orphan order remains.
-- [ ] Rate-limit governor holds under a simulated burst without exceeding the app budget.
+- [x] Rate-limit governor holds under a simulated burst without exceeding the app budget.
+      *(evidence: `pnpm --filter @platform/rate-governor test` — 12 tests, 0 failures, fake clock.
+      `governor.test.ts`: "a burst within the app budget is allowed and the budget is spent",
+      "the app budget is shared, so one tenant can exhaust capacity for a channel",
+      "a denied call does not spend budget", "a channel-wide cooldown from Retry-After blocks
+      every tenant, then lifts".)*
+
+**Known limits (recorded, not hidden)**
+
+- Governor state is in-memory per process. With more than one worker replica each replica would
+  allow the full app budget, so we would exceed the marketplace limit. Single process is correct
+  for M3; the Redis-backed store lands behind the same interface before horizontal scaling.
+- The governor reschedules; it does not yet know the workflow engine's retry semantics, because
+  the worker does not exist. Wiring is part of the import/push workflows below.
 
 **Non-goals**
 
