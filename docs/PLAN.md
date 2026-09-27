@@ -37,14 +37,18 @@ codebase, before any business logic exists.
 
 - Monorepo with pnpm workspaces grouped per `docs/adr/0004`: `apps/services/*`, `apps/web/*`,
   `packages/*`, `connectors/*`, `data-plane/*`, `tooling/*`.
-- TypeScript strict, shared tsconfig, path aliases.
-- Empty workspaces with declared `exports`: `contracts`, `channel-sdk`, `tenant-client`, `secrets`.
-  `connectors/tiktok-tokopedia`, `data-plane/modules/*`, and `apps/web/ops-console` exist as
-  reserved boundaries and stay empty until their milestone.
+- TypeScript strict with a shared `tooling/tsconfig/base.json`. Cross-package imports use the
+  workspace package `exports` map, not path aliases — aliases would let code deep-import internal
+  files, which `AGENTS.md` §3 forbids.
+- Workspaces with declared `exports`: `contracts` (types, errors, events), `channel-sdk` (the
+  frozen `ChannelConnector` contract), `tenant-client` and `secrets` (boundaries only, no
+  implementation yet). `connectors/tiktok-tokopedia`, `data-plane/modules/*`, and
+  `apps/web/ops-console` exist as reserved boundaries and stay empty until their milestone.
 - `pnpm boundaries` checker enforcing: dependency direction, no Medusa core imports outside the
-  data plane, no direct DB access from `apps/services/integration-plane`/`apps/services/worker`.
-- CI running `pnpm check` + `pnpm boundaries` on every PR.
-- `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `docs/adr/0000-0004`.
+  data plane, no direct DB access outside `control-plane`/`tenant-client`. It scans both source
+  imports and `package.json` dependencies, and has its own test suite.
+- CI running typecheck, lint, test and boundaries on every PR.
+- `AGENTS.md`, `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `docs/adr/0000-0005`.
 - `.env.example` listing required variable names with no real values.
 - `docker-compose.yml` for local Postgres + Redis.
 - PR template that requires: milestone reference, `pnpm check` result, and dependency
@@ -52,11 +56,16 @@ codebase, before any business logic exists.
 
 **Exit criteria**
 
-- [ ] `pnpm check` passes on a clean clone.
-- [ ] `pnpm boundaries` fails when a deliberate violating import is added (prove it with a
-      throwaway branch, then revert).
-- [ ] CI blocks a PR with a failing check.
-- [ ] A new contributor can run the stack locally using only the README.
+- [x] `pnpm check` passes on a clean clone. *(verified locally: typecheck, lint, 15 checker tests,
+      boundaries all green)*
+- [x] `pnpm boundaries` fails when a deliberate violating import is added. *(verified: a throwaway
+      file importing `pg`, `@medusajs/framework`, and a sibling service produced exactly three
+      findings with correct file and line, then was deleted)*
+- [ ] CI blocks a PR with a failing check. *The workflow is in place; enforcement can only be
+      observed on a real PR, so this stays open until the first PR runs it.*
+- [x] A new contributor can run the stack locally using only the README. *(verified:
+      `docker compose up -d` brings both services to `(healthy)`; `psql select 1` and
+      `redis-cli ping` both respond)*
 
 **Non-goals**
 

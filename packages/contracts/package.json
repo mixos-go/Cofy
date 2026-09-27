@@ -1,0 +1,17 @@
+{
+  "name": "@platform/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared types, schemas, errors and events. Leaf: imports nothing from this repository.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "typescript": "^5.6.3"
+  }
+}

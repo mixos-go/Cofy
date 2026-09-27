@@ -1,0 +1,20 @@
+{
+  "name": "@platform/tenant-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The only permitted path to tenant data. Resolves tenant_id to a connection.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "typescript": "^5.6.3"
+  }
+}

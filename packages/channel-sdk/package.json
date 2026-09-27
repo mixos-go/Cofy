@@ -1,0 +1,20 @@
+{
+  "name": "@platform/channel-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The ChannelConnector contract. Frozen in M2; connectors implement it verbatim.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "typescript": "^5.6.3"
+  }
+}

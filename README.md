@@ -18,8 +18,9 @@ in the control plane (tenancy, provisioning) and the integration plane (marketpl
 
 ## Current status
 
-**M0 — Repo foundation & guardrails.** No business logic yet. See `docs/PLAN.md` for milestones
-and the active one.
+**M0 — Repo foundation & guardrails.** Tooling is live: strict TypeScript across workspaces, a
+shared ESLint baseline, and an automated dependency-boundary checker. No business logic yet. See
+`docs/PLAN.md` for milestones and the active one.
 
 ## Read these first
 
@@ -34,17 +35,25 @@ and the active one.
 
 ```bash
 pnpm install
-pnpm check          # typecheck + lint + test
+pnpm check          # typecheck + lint + test + boundaries
 pnpm boundaries     # enforce dependency direction and forbidden imports
+pnpm typecheck      # tsc --noEmit across all workspaces
+pnpm lint           # eslint
+pnpm test           # unit + contract tests
 ```
 
 Local infrastructure (Postgres, Redis):
 
 ```bash
 docker compose up -d
+docker compose ps          # both services should report (healthy)
 ```
 
 Copy `.env.example` to `.env` and fill in real values locally. **Never commit `.env`.**
+
+The dependency-boundary checker is the guardrail that keeps the layout from eroding. Its rules
+live in `tooling/boundaries/src/config.js`, and its tests in `tooling/boundaries/test/`. If you
+change a rule, change the test that covers it in the same commit.
 
 ## Repository layout
 

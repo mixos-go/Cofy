@@ -102,7 +102,8 @@ seller UI code exists.
 **What becomes harder / technical debt we accept:**
 
 - **Slightly deeper paths** (`apps/services/control-plane`) and a longer relative import base.
-  Mitigated by TypeScript path aliases.
+  Mitigated by workspace package names (`@platform/*`) resolved through pnpm, which keep imports
+  short without reintroducing deep-import paths.
 - **Three groupings to explain to newcomers** instead of one. Mitigated by `docs/ARCHITECTURE.md`
   §5 and this ADR.
 - **`ops-console/` sits empty initially**, which can look like clutter. Accepted deliberately as a

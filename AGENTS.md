@@ -103,15 +103,19 @@ Each connector is a single workspace `connectors/<name>/` implementing the inter
 ```ts
 export interface ChannelConnector {
   readonly channel: ChannelCode;                    // "tiktok_tokopedia" | "shopee" | ...
-  authorize(ctx: OAuthContext): Promise<Credential>;
+  beginAuthorization(ctx: AuthorizationContext): Promise<AuthorizationRequest>;
+  completeAuthorization(ctx: AuthorizationContext, params: OAuthCallbackParams): Promise<Credential>;
   refreshCredential(cred: Credential): Promise<Credential>;
   fetchOrders(cursor: Cursor, cred: Credential): Promise<Page<ChannelOrder>>;
-  acknowledgeOrder(externalId: string, cred: Credential): Promise<void>;
-  pushStock(items: StockUpdate[], cred: Credential): Promise<StockResult[]>;
-  webhookHandlers(): Record<string, WebhookHandler>;
+  acknowledgeOrder(externalOrderId: string, cred: Credential): Promise<void>;
+  pushStock(items: readonly StockUpdate[], cred: Credential): Promise<readonly StockResult[]>;
+  webhookHandlers(): Readonly<Record<string, WebhookHandler>>;
   capabilities(): ChannelCapabilities;              // declaration, not assumption
 }
 ```
+
+The authoritative definition lives in `packages/channel-sdk/src/index.ts`; the block above is a
+summary. The shape is frozen and its rationale is recorded in `docs/adr/0005`.
 
 Connector rules:
 
@@ -125,6 +129,8 @@ Connector rules:
   may know the raw marketplace response shape.
 - **Webhook handlers must be idempotent and fast.** Verify the signature, enqueue, return. No
   outbound calls from inside a webhook handler.
+- **Connectors are pure with respect to credentials.** They receive a `Credential` and never look
+  one up. Secret storage stays in `packages/secrets`; see `docs/adr/0005`.
 
 When adding a new connector: **copy the structure of an existing connector; do not invent a new
 style.** Consistency matters more than design preference.
@@ -169,15 +175,18 @@ style.** Consistency matters more than design preference.
 ```bash
 pnpm install                 # install all workspaces
 pnpm typecheck               # tsc --noEmit across all packages
-pnpm lint                    # eslint + dependency boundary check
+pnpm lint                    # eslint across the repo
 pnpm test                    # unit + contract tests
+pnpm boundaries              # dependency direction + forbidden-import checker
 pnpm test:integration        # requires docker (postgres, redis)
-pnpm check                   # typecheck + lint + test — run before committing
+pnpm check                   # typecheck + lint + test + boundaries — run before committing
 ```
 
-CI runs `pnpm check` plus `pnpm boundaries`. **`pnpm boundaries` enforces §3 and §2.1/2.2**
+CI runs the same steps as `pnpm check`. **`pnpm boundaries` enforces §3, §2.1 and §2.3**
 (cross-layer imports, forbidden Medusa core imports, direct database access). If the checker
-complains, fix the code — do not disable the checker.
+complains, fix the code — do not disable the checker. Its rules live in
+`tooling/boundaries/src/config.js`; its own tests live in `tooling/boundaries/test/` and must stay
+green, because a checker that silently stops checking is worse than no checker.
 
 ---
 

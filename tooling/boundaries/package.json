@@ -1,0 +1,17 @@
+{
+  "name": "@platform/boundaries",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Static checker enforcing the dependency and import invariants in AGENTS.md",
+  "bin": {
+    "platform-boundaries": "./src/cli.js"
+  },
+  "scripts": {
+    "check": "node ./src/cli.js",
+    "test": "node --test ./test/*.test.js"
+  },
+  "dependencies": {
+    "typescript": "^5.6.3"
+  }
+}
