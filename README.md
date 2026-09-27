@@ -18,9 +18,13 @@ in the control plane (tenancy, provisioning) and the integration plane (marketpl
 
 ## Current status
 
-**M0 — Repo foundation & guardrails.** Tooling is live: strict TypeScript across workspaces, a
-shared ESLint baseline, and an automated dependency-boundary checker. No business logic yet. See
-`docs/PLAN.md` for milestones and the active one.
+The connector layer is live-verified: TikTok Shop/Tokopedia OAuth and order pull work against a
+real shop, and Shopee is implemented. The integration plane service now exists — it serves OAuth
+begin/callback, persists seller credentials, and can probe a stored credential against the live
+marketplace API. The remaining prerequisite before order import is a fixed egress IP registered in
+each marketplace app's allowlist (see `docs/PLAN.md` E0).
+
+See `docs/PLAN.md` for milestones and the active one.
 
 ## Read these first
 

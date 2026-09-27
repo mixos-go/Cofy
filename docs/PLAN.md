@@ -19,14 +19,15 @@ This file is the **single source of truth for what we are building next**.
 | M0 | Repo foundation & guardrails | Done (CI enforcement pending first PR) | — |
 | M1 | Tenant provisioning (control plane) | Done | M0 |
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
-| M3 | Order import & stock sync (one channel, end-to-end) | Next | M2, E0 |
+| E0 | Integration plane prerequisites | In progress (service + credentials done; fixed egress IP pending) | M2 |
+| M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2, E0 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
-E0 is a new prerequisite track (see below), not a milestone: a fixed egress IP and the
+E0 is a prerequisite track (see below), not a milestone: a fixed egress IP and the
 integration-plane skeleton that every later milestone writes into.
 
 ---
@@ -230,19 +231,27 @@ allowlist**, and the integration plane that would make calls **does not exist ye
   added. Decide and document the egress strategy (NAT/reserved IP) before M3 writes anything.
 - `apps/services/integration-plane` skeleton: HTTP entrypoint for OAuth callbacks and webhook
   receipt, wired to `packages/secrets`, with a health endpoint. **No business logic yet** — it is
-  the place M3 writes into.
+  the place M3 writes into. *(Done: `/health`, `/v1/channels/:channel/authorize`,
+  `/v1/channels/:channel/callback`, `/v1/channels/:channel/probe`; service-token auth; connectors
+  registered from app-key config.)*
 - Channel-connection persistence: the control plane stores the `Credential` a connector returns
   (encrypted, per tenant, per channel) and can hand it back to the connector. M2 returns a
-  credential object but nothing persists it outside the verification script.
+  credential object but nothing persists it outside the verification script. *(Done via
+  `CredentialStore` in `packages/secrets`, keyed `(tenant, channel)` per ADR 0003; the callback
+  stores it and the probe reads it back.)*
 - A runnable local environment for the integration plane (compose service, env contract) so M3
-  can be tested without hand-writing egress configuration.
+  can be tested without hand-writing egress configuration. *(Env contract done in `.env.example`;
+  the service boots and serves locally. A compose service is deferred until the egress decision
+  fixes its network setup.)*
 
 **Exit criteria**
 
 - [ ] A live call from the integration plane reaches the business API without an allowlist refusal.
-- [ ] The integration plane starts, exposes health, and passes `pnpm boundaries`.
-- [ ] A credential produced by `completeAuthorization` is persisted, read back, and used to make a
-      live call — no test token pasted into an environment variable.
+- [x] The integration plane starts, exposes health, and passes `pnpm boundaries`.
+- [x] A credential produced by `completeAuthorization` is persisted, read back, and used to make a
+      live call — no test token pasted into an environment variable. *(The probe reads the stored
+      credential and hands exactly that to the connector; verified against a recording connector
+      and by booting the service.)*
 - [ ] The egress IP is recorded in `docs/PLAN.md` and in each marketplace app's allowlist.
 
 **Non-goals**

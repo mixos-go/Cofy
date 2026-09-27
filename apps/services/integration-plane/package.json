@@ -1,9 +1,9 @@
 {
-  "name": "@platform/control-plane",
+  "name": "@platform/integration-plane",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Tenant registry, provisioning, identity. Owns who a tenant is, not what they sell.",
+  "description": "Marketplace-facing service: connectors, OAuth callbacks, credential storage, live probes. Never reaches into a tenant data plane.",
   "exports": {
     ".": "./src/index.ts"
   },
@@ -14,17 +14,17 @@
     "start": "node src/main.ts"
   },
   "dependencies": {
+    "@platform/channel-sdk": "workspace:*",
+    "@platform/connector-shopee": "workspace:*",
+    "@platform/connector-tiktok-tokopedia": "workspace:*",
     "@platform/contracts": "workspace:*",
     "@platform/observability": "workspace:*",
     "@platform/secrets": "workspace:*",
-    "@platform/tenant-client": "workspace:*",
-    "pg": "^8.13.1",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@platform/tsconfig": "workspace:*",
     "@types/node": "^22.10.1",
-    "@types/pg": "^8.11.10",
     "typescript": "^5.6.3"
   }
 }

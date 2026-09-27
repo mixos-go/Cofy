@@ -1,0 +1,22 @@
+{
+  "name": "@platform/observability",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Structured JSON logging shared by every service. The one place that decides how a log line looks.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

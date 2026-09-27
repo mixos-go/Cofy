@@ -67,11 +67,18 @@ Owns everything about *talking to the outside world*.
 
 - Connectors (via `connectors/*`) implementing `packages/channel-sdk`.
 - Webhook receivers: verify signature, persist raw event, enqueue, return. Nothing else.
-- OAuth authorization and callback handling.
+- OAuth authorization and callback handling. `state` values are single-use and expiring, and the
+  redirect URI is derived from configured public origin, never from a request header.
+- Seller credentials: the callback persists what the connector returns via
+  `packages/secrets`' `CredentialStore`; the probe path proves a stored credential still works.
 - Rate-limit governor: global scheduling per app key and per seller.
 - Credential refresh scheduling.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
+
+The service depends only on the `ChannelConnector` interface; connectors are constructed in
+`main.ts` and injected, so adding a channel does not change the service. It is called by the control
+plane and worker over HTTP with a service token — services never import each other (AGENTS.md §3).
 
 ### Worker (`apps/services/worker`)
 
@@ -98,7 +105,8 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 | `packages/contracts` | Types, zod schemas, error types, event definitions | nothing |
 | `packages/channel-sdk` | `ChannelConnector` interface + shared connector utilities | `contracts` |
 | `packages/tenant-client` | The only allowed path to tenant data | `contracts` |
-| `packages/secrets` | KMS-backed secret access | `contracts` |
+| `packages/secrets` | KMS-backed secret access, and the typed `CredentialStore` over it | `contracts` |
+| `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
 
 ## 3. Key flows
 
@@ -187,9 +195,10 @@ packages/                   # stable shared libraries — few, slow to change
   channel-sdk/
   tenant-client/
   secrets/
+  observability/
 connectors/                 # adapters — volatile, one package per channel
   tiktok-tokopedia/
-  shopee/                   # planned (M8)
+  shopee/                   # built early, ahead of its M8 milestone
   lazada/                   # planned (M8)
 data-plane/                 # runs INSIDE each tenant's Medusa instance
   medusa-config/

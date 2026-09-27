@@ -8,6 +8,8 @@ import type { ChannelCode, TenantId } from "@platform/contracts";
  * fixes the boundary.
  */
 
+export * from "./credential-store.ts";
+
 export interface SecretRef {
   readonly tenantId: TenantId;
   readonly channel: ChannelCode;
