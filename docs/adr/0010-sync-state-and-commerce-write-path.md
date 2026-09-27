@@ -58,6 +58,35 @@ Concretely:
    HTTP. `tenant-client` remains the boundary for the control plane's own data operations and for
    later read paths that genuinely need SQL.
 
+## Implementation status (pending approval)
+
+Built against this decision so the approval is a yes/no on a working design, not a guess:
+
+- `packages/sync-state` holds (1) with the real uniqueness and claim semantics: an external-order
+  ref is unique per `(tenant, channel, external_order_id)`; an idempotency claim is `claimed`,
+  `replay` or `in_flight`. 16 tests. Composite keys are joined with a NUL separator (`\u0000`),
+  which no tenant id, channel or SKU contains, so `a:b` + `c` cannot collide with `a` + `b:c`.
+- The control plane exposes it at `/v1/sync/*` behind a **service token** — the worker's credential,
+  separate from an operator session, and the surface is closed when no token is configured rather
+  than open by default (ADR 0008's shape, applied to this new caller). 7 route tests cover auth,
+  reserve/commit, idempotency conflict, SKU-map round-trip and cursor validation.
+- `apps/services/worker` implements order import, listing import and stock push over four ports
+  (`SyncStateClient`, `ChannelGateway`, `CommerceClient`, `EventPublisher`). Commerce writes go
+  through the tenant Admin API exactly as (2); the compensation path reads (3)'s
+  `channel-order-link` rather than trusting worker memory. 15 tests.
+- **Not enabled in any running process.** `main.ts` refuses to run workflows on a timer because the
+  engine (M4) does not exist, per AGENTS.md §2.5.
+
+Two things a reviewer should weigh, both recorded as M3 known limits in `docs/PLAN.md`: the running
+control plane still wires the in-memory store (persistence is a follow-up behind the same
+interface), and an `in_flight` idempotency claim has no expiry yet — a crashed attempt's order is
+skipped by later runs until reconciliation (M4) clears it, rather than being retried.
+
+The compensation test the M3 exit gate asks for passes at the port boundary, with the marketplace
+and Medusa faked (they are external boundaries, AGENTS.md §6) and the sync state real. Until this
+ADR is approved, "an order lands in Medusa" is correct-by-construction, not observed against a live
+tenant.
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |

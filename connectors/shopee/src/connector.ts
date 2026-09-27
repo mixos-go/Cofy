@@ -6,16 +6,17 @@
  * these field names (AGENTS.md §4).
  *
  * Deliberate scope choices, each recorded rather than silently no-op'd:
- * - `pushStock` reports `channel_error` with a clear reason. Shopee's `update_stock` addresses
- *   items by `item_id`/`model_id`, which Shopee assigns, not by our SKU. Until listing import
- *   maps our SKUs to Shopee ids, a stock push cannot be honest, so
- *   `capabilities().supportsStockPush` says so instead of pretending.
+ * - `pushStock` addresses items by `item_id`/`model_id`, which come from `fetchListings`
+ *   (`get_item_list` + `get_model_list`, docs/adr/0009). An item without a resolved mapping is
+ *   reported `unknown_sku`, never sent.
  * - `splitsOrderHistory` is `false`. ADR-0003's two-API split applies to the
  *   TikTok Shop + Tokopedia channel, not to Shopee.
  */
 
 import { PlatformError } from "@platform/contracts";
 import type {
+  ChannelListing,
+  ChannelListingVariant,
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
@@ -38,6 +39,12 @@ import type {
 
 import type { ShopeeConnectorConfig } from "./config.ts";
 import { assertNoErrorBody, toPlatformError } from "./errors.ts";
+import type {
+  ShopeeItemBaseInfoResponse,
+  ShopeeItemListResponse,
+  ShopeeModelListResponse
+} from "./listing-schema.ts";
+import { shopeeListingStatus } from "./listing-schema.ts";
 import { assertIdr, epochSecondsToInstant, rupiahToMinor } from "./money.ts";
 import { Shopee, asResponseBody, verifyPushSignature } from "./vendor/shopee-sdk.ts";
 import type {
@@ -310,17 +317,6 @@ export class ShopeeConnector implements ChannelConnector {
     );
   }
 
-  async pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]> {
-    // Declared `false` in capabilities(). Returning per-item rejections rather than throwing keeps
-    // the batch contract: the caller learns which SKUs were not pushed and can act on it.
-    void credential;
-    return items.map((item) => ({
-      sku: item.sku,
-      accepted: false,
-      reason: "channel_error" as const
-    }));
-  }
-
   webhookHandlers(): Readonly<Record<string, WebhookHandler>> {
     return {
       order_status: {
@@ -362,14 +358,176 @@ export class ShopeeConnector implements ChannelConnector {
     };
   }
 
+  async pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]> {
+    const client = this.clientFor(credential);
+    const results: StockResult[] = [];
+
+    // `update_stock` is per item: one call carries every model of one item. Items without a
+    // resolved item_id are reported `unknown_sku` rather than sent (docs/adr/0009).
+    const byItem = new Map<string, StockUpdate[]>();
+    for (const item of items) {
+      if (item.externalProductId === undefined || item.externalSkuId === undefined) {
+        results.push({ sku: item.sku, accepted: false, reason: "unknown_sku" });
+        continue;
+      }
+      const bucket = byItem.get(item.externalProductId);
+      if (bucket === undefined) byItem.set(item.externalProductId, [item]);
+      else bucket.push(item);
+    }
+
+    for (const [itemId, group] of byItem) {
+      const stockList = group.map((item) => ({
+        model_id: Number(item.externalSkuId),
+        seller_stock: [{ stock: item.available }]
+      }));
+
+      try {
+        const response = asResponseBody<{ error?: string; message?: string }>(
+          await client.product.updateStock({ item_id: Number(itemId), stock_list: stockList })
+        );
+        assertNoErrorBody(response, "pushStock/updateStock");
+        // Shopee answers with per-model `failure_list` inside a success envelope, so acceptance is
+        // read from the body rather than assumed from the absence of an error.
+        const failed = new Set(
+          (response as { response?: { failure_list?: readonly { model_id?: number }[] } }).response?.failure_list
+            ?.map((entry) => String(entry.model_id ?? ""))
+            .filter((id) => id !== "") ?? []
+        );
+        for (const item of group) {
+          const rejected = item.externalSkuId !== undefined && failed.has(item.externalSkuId);
+          results.push(
+            rejected
+              ? { sku: item.sku, accepted: false, reason: "channel_error" }
+              : { sku: item.sku, accepted: true, reason: null }
+          );
+        }
+      } catch (error) {
+        const mapped = toPlatformError(error, "pushStock");
+        const reason: StockResult["reason"] =
+          mapped.code === "CHANNEL_RATE_LIMITED" ? "rate_limited" : "channel_error";
+        for (const item of group) {
+          results.push({ sku: item.sku, accepted: false, reason });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  async fetchListings(cursor: Cursor, credential: Credential): Promise<Page<ChannelListing>> {
+    const offset = cursor.value === null || cursor.value === "" ? 0 : this.listingOffset(cursor);
+    const client = this.clientFor(credential);
+    try {
+      const list = asResponseBody<ShopeeItemListResponse>(
+        await client.product.getItemList({
+          offset,
+          page_size: this.config.pageSize,
+          item_status: ["NORMAL"]
+        })
+      );
+      assertNoErrorBody(list, "fetchListings/getItemList");
+
+      const summaries = list.response?.item ?? [];
+      const listings = await this.fetchListingDetails(client, summaries);
+
+      const hasNext = list.response?.has_next_page === true;
+      const nextOffset = list.response?.next_offset;
+      const next: Cursor =
+        hasNext && typeof nextOffset === "number"
+          ? { value: JSON.stringify({ offset: nextOffset }) }
+          : { value: null }; // caught up (AGENTS.md §9)
+
+      return { items: listings, next };
+    } catch (error) {
+      throw toPlatformError(error, "fetchListings");
+    }
+  }
+
+  private listingOffset(cursor: Cursor): number {
+    try {
+      const parsed = JSON.parse(cursor.value ?? "") as { offset?: unknown };
+      if (typeof parsed.offset !== "number") throw new Error("offset missing");
+      return parsed.offset;
+    } catch (error) {
+      throw new PlatformError("VALIDATION_FAILED", "Shopee listing cursor is not a payload this connector produced.", {
+        cause: error
+      });
+    }
+  }
+
+  /**
+   * `get_item_list` returns ids and status only, so each item's SKUs are read through
+   * `get_model_list` in bounded batches, and the item-level seller SKU from `get_item_base_info`.
+   * This is the same two-read shape the order path uses.
+   */
+  private async fetchListingDetails(
+    client: Shopee,
+    summaries: readonly { item_id?: number; item_status?: string; update_time?: number }[]
+  ): Promise<ChannelListing[]> {
+    const ids = summaries.map((item) => item.item_id).filter((id): id is number => typeof id === "number");
+    if (ids.length === 0) return [];
+
+    const baseInfo = new Map<number, string>();
+    for (let index = 0; index < ids.length; index += this.config.detailBatchSize) {
+      const batch = ids.slice(index, index + this.config.detailBatchSize);
+      const info = asResponseBody<ShopeeItemBaseInfoResponse>(
+        await client.product.getItemBaseInfo({ item_id_list: batch })
+      );
+      assertNoErrorBody(info, "fetchListings/getItemBaseInfo");
+      for (const entry of info.response?.item_list ?? []) {
+        if (typeof entry.item_id === "number" && entry.item_sku !== undefined) {
+          baseInfo.set(entry.item_id, entry.item_sku);
+        }
+      }
+    }
+
+    const listings: ChannelListing[] = [];
+    for (const summary of summaries) {
+      const itemId = summary.item_id;
+      if (typeof itemId !== "number") continue;
+
+      const models = asResponseBody<ShopeeModelListResponse>(
+        await client.product.getModelList({ item_id: itemId })
+      );
+      assertNoErrorBody(models, "fetchListings/getModelList");
+
+      const itemSku = baseInfo.get(itemId);
+      const variants: ChannelListingVariant[] = (models.response?.model ?? []).map((model) => {
+        if (typeof model.model_id !== "number") {
+          throw new PlatformError("UPSTREAM_ERROR", `Shopee item ${itemId} has a model without an id.`);
+        }
+        const sku = model.model_sku !== undefined && model.model_sku !== "" ? model.model_sku : null;
+        return {
+          externalSkuId: String(model.model_id),
+          // Fall back to the item-level SKU for a single-variant item, where Shopee leaves
+          // `model_sku` empty and stores the SKU on the item (confirmed shape in the OAS).
+          sku: sku ?? (itemSku !== undefined && itemSku !== "" ? itemSku : null),
+          externalInventoryId: null
+        };
+      });
+
+      listings.push({
+        channel: this.channel,
+        externalProductId: String(itemId),
+        title: "",
+        status: shopeeListingStatus(summary.item_status),
+        variants,
+        updatedAt: typeof summary.update_time === "number" ? epochSecondsToInstant(summary.update_time) : null
+      });
+    }
+    return listings;
+  }
+
   capabilities(): ChannelCapabilities {
     return {
       supportsOrderPull: true,
-      // See pushStock: Shopee addresses stock by its own item_id/model_id, not by SKU.
-      supportsStockPush: false,
+      // A real push now: `updateStock` is addressed by the item_id/model_id a listing import
+      // resolves (docs/adr/0009).
+      supportsStockPush: true,
       supportsWebhooks: true,
       supportsOrderAcknowledgement: false,
-      splitsOrderHistory: false
+      splitsOrderHistory: false,
+      supportsListingRead: true
     };
   }
 

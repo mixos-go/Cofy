@@ -1,5 +1,7 @@
 export * from "./ids.ts";
 export * from "./orders.ts";
+export * from "./listings.ts";
+export * from "./sync.ts";
 export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./tenant.ts";

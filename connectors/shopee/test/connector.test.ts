@@ -335,21 +335,23 @@ test("a 5xx becomes a retryable upstream error and a 401 does not", async () => 
   );
 });
 
-test("capabilities are declared honestly, including what this channel cannot do yet", () => {
+test("capabilities advertise the implemented listing read and stock push", () => {
   const connector = new ShopeeConnector(makeConfig(transport([{}]).fetch));
   const capabilities = connector.capabilities();
 
   assert.deepEqual(capabilities, {
     supportsOrderPull: true,
-    supportsStockPush: false,
+    supportsStockPush: true,
     supportsWebhooks: true,
     supportsOrderAcknowledgement: false,
-    splitsOrderHistory: false
+    splitsOrderHistory: false,
+    supportsListingRead: true
   });
 });
 
-test("pushStock reports a per-item rejection instead of pretending to succeed", async () => {
-  const connector = new ShopeeConnector(makeConfig(transport([{}]).fetch));
+test("pushStock rejects unmapped SKUs as unknown_sku without calling Shopee", async () => {
+  const { fetch: fetchImpl, urls } = transport([{ error: "", response: {} }]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
 
   const results = await connector.pushStock(
     [
@@ -360,7 +362,92 @@ test("pushStock reports a per-item rejection instead of pretending to succeed", 
   );
 
   assert.equal(results.length, 2);
-  assert.ok(results.every((result) => !result.accepted && result.reason === "channel_error"));
+  assert.ok(results.every((result) => !result.accepted && result.reason === "unknown_sku"));
+  assert.equal(urls.length, 0);
+});
+
+test("pushStock sends a mapped SKU and accepts it when Shopee reports no failure", async () => {
+  const { fetch: fetchImpl, urls } = transport([{ error: "", response: { success_list: [{ model_id: 11 }] } }]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const results = await connector.pushStock(
+    [{ sku: "SKU-1", available: 9, externalProductId: "1001", externalSkuId: "11" }],
+    credential
+  );
+
+  assert.deepEqual(results, [{ sku: "SKU-1", accepted: true, reason: null }]);
+  assert.ok(urls[0]?.includes("update_stock"), "the request must go to update_stock");
+});
+
+test("pushStock reports channel_error for a model Shopee rejected inside a success envelope", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(transport([{ error: "", response: { failure_list: [{ model_id: 11, failed_reason: "invalid" }] } }]).fetch)
+  );
+
+  const results = await connector.pushStock(
+    [{ sku: "SKU-1", available: 1, externalProductId: "1001", externalSkuId: "11" }],
+    credential
+  );
+
+  assert.deepEqual(results, [{ sku: "SKU-1", accepted: false, reason: "channel_error" }]);
+});
+
+test("fetchListings resolves item ids and models into the platform shape", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL", update_time: 1_700_000_000 }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_name: "Kaos", item_sku: "SKU-1" }] } },
+        { error: "", response: { model: [{ model_id: 11, model_sku: "SKU-1", model_status: "MODEL_NORMAL" }] } }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchListings({ value: null }, credential);
+
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.externalProductId, "1001");
+  assert.equal(page.items[0]?.status, "active");
+  assert.deepEqual(page.items[0]?.variants, [{ externalSkuId: "11", sku: "SKU-1", externalInventoryId: null }]);
+  assert.equal(page.next.value, null);
+});
+
+test("fetchListings falls back to the item SKU when a single-variant model has none", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL" }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_sku: "SKU-ITEM" }] } },
+        { error: "", response: { model: [{ model_id: 11, model_sku: "" }] } }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchListings({ value: null }, credential);
+
+  assert.equal(page.items[0]?.variants[0]?.sku, "SKU-ITEM");
+});
+
+test("fetchListings returns a resumable offset while Shopee reports another page", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL" }], has_next_page: true, next_offset: 50 } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_sku: "SKU-1" }] } },
+        { error: "", response: { model: [{ model_id: 11, model_sku: "SKU-1" }] } },
+        { error: "", response: { item: [{ item_id: 1002, item_status: "NORMAL" }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1002, item_sku: "SKU-2" }] } },
+        { error: "", response: { model: [{ model_id: 12, model_sku: "SKU-2" }] } }
+      ]).fetch
+    )
+  );
+
+  const first = await connector.fetchListings({ value: null }, credential);
+  assert.notEqual(first.next.value, null);
+
+  const second = await connector.fetchListings(first.next, credential);
+  assert.equal(second.items[0]?.externalProductId, "1002");
+  assert.equal(second.next.value, null);
 });
 
 test("acknowledgeOrder fails loudly because the channel has no such operation", async () => {

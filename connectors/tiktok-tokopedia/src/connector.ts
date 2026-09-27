@@ -10,9 +10,12 @@
  *   (`/order/202309/orders/search`) can return orders with only `{ id, external_order, line_items }`
  *   when the query is narrow; full detail needs the detail endpoint per order id. Reconciliation
  *   therefore reads both APIs.
- * - `pushStock` reports per-item `channel_error`. TikTok's `updateInventory` addresses items by a
- *   platform `product_id` plus `sku_id`, which TikTok assigns. Until listing import maps our SKUs,
- *   an end-to-end stock push cannot be honest, so the capability says `false`.
+ * - `pushStock` addresses items by the platform `product_id` plus `sku_id` that `fetchListings`
+ *   resolves (docs/adr/0009). An item without a mapping is reported `unknown_sku`, never sent, so
+ *   the capability can say `true` without pretending a mapping exists.
+ * - The listing field names (`products[].id`, `products[].status`, per-SKU `id`/`seller_sku`) come
+ *   from the official OAS and are not yet confirmed against a live Development Shop; that gap is
+ *   recorded in docs/PLAN.md rather than hidden.
  * - Webhooks are declared unsupported. See `webhookHandlers()` for why: the signature scheme is not
  *   in the official OAS or the vendored SDK, and implementing a guess would fail open or reject
  *   valid traffic.
@@ -20,6 +23,8 @@
 
 import { PlatformError } from "@platform/contracts";
 import type {
+  ChannelListing,
+  ChannelListingVariant,
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
@@ -41,11 +46,13 @@ import type {
 
 import type { TikTokConnectorConfig } from "./config.ts";
 import { assertSuccess, toPlatformError } from "./errors.ts";
+import type { TikTokProduct, TikTokSearchProductsResponse, TikTokUpdateInventoryResponse } from "./listing-schema.ts";
+import { listingStatusOf } from "./listing-schema.ts";
 import { assertIdr, decimalToMinor, epochSecondsToInstant } from "./money.ts";
 import type { TikTokOrder, TikTokOrderDetailResponse, TikTokOrderSearchResponse } from "./order-schema.ts";
 import { lineQuantity } from "./order-schema.ts";
 import { TikTokShop, buildAuthUrl, exchangeAuthCode, refreshAccessToken } from "./vendor/tiktok-shop-sdk.ts";
-import type { GetOrderListBody, TokenResponse } from "./vendor/tiktok-shop-sdk.ts";
+import type { GetOrderListBody, SearchProductsBody, TokenResponse } from "./vendor/tiktok-shop-sdk.ts";
 
 /** Cursor payload. Opaque to the caller; only this connector may interpret it (contract doc). */
 interface TikTokCursor {
@@ -58,6 +65,18 @@ interface TikTokCursor {
 }
 
 const MAX_WINDOW_SECONDS = 24 * 60 * 60;
+
+/** Listing cursor. Like the order cursor, opaque to callers; `pageToken: ""` means "start". */
+interface TikTokListingCursor {
+  readonly pageToken: string;
+  /** Inclusive lower bound of the update-time window, in epoch seconds. */
+  readonly updateTimeGe: number;
+  /** Exclusive upper bound of the update-time window, in epoch seconds. */
+  readonly updateTimeLt: number;
+}
+
+/** How far back a first listing walk looks. Listings change less often than orders. */
+const LISTING_LOOKBACK_SECONDS = 30 * 24 * 60 * 60;
 
 /** The token endpoint types `code` as `number | string`; normalise before classifying it. */
 function normalizeCode(code: number | string | undefined): number | undefined {
@@ -331,13 +350,148 @@ export class TikTokConnector implements ChannelConnector {
   }
 
   async pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]> {
-    // Declared `false` in capabilities(): updateInventory wants TikTok's own product_id and sku_id.
-    void credential;
-    return items.map((item) => ({
-      sku: item.sku,
-      accepted: false,
-      reason: "channel_error" as const
-    }));
+    const client = this.clientFor(credential);
+    const results: StockResult[] = [];
+
+    // TikTok's updateInventory addresses one product per call, so items are grouped by the
+    // product_id a listing import resolved. An item without a mapping is reported `unknown_sku`
+    // rather than sent anywhere: an unmapped SKU has no place to go (docs/adr/0009).
+    const byProduct = new Map<string, StockUpdate[]>();
+    for (const item of items) {
+      if (item.externalProductId === undefined || item.externalSkuId === undefined) {
+        results.push({ sku: item.sku, accepted: false, reason: "unknown_sku" });
+        continue;
+      }
+      const bucket = byProduct.get(item.externalProductId);
+      if (bucket === undefined) byProduct.set(item.externalProductId, [item]);
+      else bucket.push(item);
+    }
+
+    for (const [productId, group] of byProduct) {
+      const skus = group.map((item) => ({
+        id: item.externalSkuId,
+        inventory: [
+          {
+            // TikTok needs the warehouse the stock is for when a shop has more than one. A listing
+            // import resolves it; without it the update is rejected by TikTok, which we surface
+            // rather than guessing a default.
+            warehouse_id: item.externalInventoryId,
+            quantity: item.available
+          }
+        ]
+      }));
+
+      try {
+        const response = (await client.product.updateInventory(
+          { product_id: productId },
+          { skus }
+        )) as TikTokUpdateInventoryResponse;
+        assertSuccess(response, "pushStock/updateInventory");
+
+        // A success envelope can still carry per-SKU errors. A SKU TikTok rejected must not be
+        // reported as accepted, so failures are read out of the body, not inferred from code === 0.
+        const failed = new Set<string>();
+        for (const error of response.data?.errors ?? []) {
+          for (const detail of error.detail ?? []) {
+            if (detail.sku_id !== undefined) failed.add(detail.sku_id);
+          }
+        }
+        for (const item of group) {
+          const rejected = item.externalSkuId !== undefined && failed.has(item.externalSkuId);
+          results.push(
+            rejected
+              ? { sku: item.sku, accepted: false, reason: "channel_error" }
+              : { sku: item.sku, accepted: true, reason: null }
+          );
+        }
+      } catch (error) {
+        const mapped = toPlatformError(error, "pushStock");
+        const reason: StockResult["reason"] = mapped.code === "CHANNEL_RATE_LIMITED" ? "rate_limited" : "channel_error";
+        for (const item of group) {
+          results.push({ sku: item.sku, accepted: false, reason });
+        }
+      }
+    }
+
+    return results;
+  }
+
+  async fetchListings(cursor: Cursor, credential: Credential): Promise<Page<ChannelListing>> {
+    const window = this.resolveListingCursor(cursor);
+    const client = this.clientFor(credential);
+    try {
+      const body: SearchProductsBody = {
+        update_time_ge: window.updateTimeGe,
+        update_time_le: window.updateTimeLt
+      };
+      const response = (await client.product.searchProducts(
+        { page_size: this.config.pageSize, page_token: window.pageToken === "" ? undefined : window.pageToken },
+        body
+      )) as TikTokSearchProductsResponse;
+      assertSuccess(response, "fetchListings/searchProducts");
+
+      const listings = (response.data?.products ?? []).map((product) => this.toChannelListing(product));
+      const nextToken = response.data?.next_page_token ?? "";
+      const next: Cursor =
+        nextToken === ""
+          ? { value: null } // caught up (AGENTS.md §9)
+          : { value: JSON.stringify({ ...window, pageToken: nextToken }) };
+
+      return { items: listings, next };
+    } catch (error) {
+      throw toPlatformError(error, "fetchListings");
+    }
+  }
+
+  private toChannelListing(product: TikTokProduct): ChannelListing {
+    const productId = product.id;
+    if (productId === undefined || productId === "") {
+      throw new PlatformError("UPSTREAM_ERROR", "TikTok returned a product without an id.");
+    }
+
+    const variants: ChannelListingVariant[] = (product.skus ?? []).map((sku) => {
+      const skuId = sku.id;
+      if (skuId === undefined || skuId === "") {
+        throw new PlatformError("UPSTREAM_ERROR", `TikTok product ${productId} has a SKU without an id.`);
+      }
+      // The first inventory entry is the shop's stock location. TikTok accepts stock updates per
+      // warehouse; when a product has several, later stock pushes need the same pick, so the choice
+      // is recorded here rather than made implicitly downstream.
+      const warehouse = sku.inventory?.[0]?.warehouse_id;
+      return {
+        externalSkuId: skuId,
+        sku: sku.seller_sku !== undefined && sku.seller_sku !== "" ? sku.seller_sku : null,
+        externalInventoryId: warehouse !== undefined && warehouse !== "" ? warehouse : null
+      };
+    });
+
+    return {
+      channel: this.channel,
+      externalProductId: productId,
+      title: product.title ?? "",
+      status: listingStatusOf(product.status),
+      variants,
+      updatedAt: typeof product.update_time === "number" ? epochSecondsToInstant(product.update_time) : null
+    };
+  }
+
+  /** Rebuild the listing window from an opaque cursor, defaulting to the last 30 days. */
+  private resolveListingCursor(cursor: Cursor): TikTokListingCursor {
+    if (cursor.value !== null && cursor.value !== "") {
+      try {
+        const parsed = JSON.parse(cursor.value) as TikTokListingCursor;
+        if (typeof parsed.updateTimeGe !== "number" || typeof parsed.updateTimeLt !== "number") {
+          throw new Error("cursor fields missing");
+        }
+        return parsed;
+      } catch (error) {
+        throw new PlatformError("VALIDATION_FAILED", "TikTok listing cursor is not a payload this connector produced.", {
+          cause: error
+        });
+      }
+    }
+    const now = Math.floor(Date.now() / 1000);
+    return { pageToken: "", updateTimeGe: now - LISTING_LOOKBACK_SECONDS, updateTimeLt: now };
   }
 
   /**
@@ -359,11 +513,15 @@ export class TikTokConnector implements ChannelConnector {
   capabilities(): ChannelCapabilities {
     return {
       supportsOrderPull: true,
-      supportsStockPush: false,
+      // Implemented against the identifiers a listing import resolves (docs/adr/0009). It is a
+      // real push now, but the end-to-end path is unproven until a live Development Shop confirms
+      // the listing field names and warehouse id; see the known limit in docs/PLAN.md.
+      supportsStockPush: true,
       supportsWebhooks: false,
       supportsOrderAcknowledgement: false,
       // See the file header: search returns partial orders, detail fills them (docs/adr/0003).
-      splitsOrderHistory: true
+      splitsOrderHistory: true,
+      supportsListingRead: true
     };
   }
 

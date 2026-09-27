@@ -15,8 +15,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import type { ChannelConnector, Credential } from "@platform/channel-sdk";
-import type { ChannelOrder, Cursor, Page } from "@platform/contracts";
+import type { ChannelCapabilities, ChannelConnector, Credential } from "@platform/channel-sdk";
+import type { ChannelListing, ChannelOrder, Cursor, Page } from "@platform/contracts";
 import { createLogger } from "@platform/observability";
 import { CredentialStore, InMemorySecretStore } from "@platform/secrets";
 import { InMemoryOAuthStateStore } from "../src/oauth-state.ts";
@@ -90,19 +90,38 @@ class RecordingConnector implements ChannelConnector {
   }
 
   async acknowledgeOrder(): Promise<void> {}
-  async pushStock(): Promise<readonly never[]> {
+  lastStockItems: readonly unknown[] | null = null;
+  stockCapable = false;
+  listingsInPage = 0;
+
+  async pushStock(items: readonly unknown[]): Promise<readonly never[]> {
+    this.lastStockItems = items;
     return [];
+  }
+  async fetchListings(): Promise<Page<ChannelListing>> {
+    return {
+      items: Array.from({ length: this.listingsInPage }, (_, i) => ({
+        channel: "tiktok_tokopedia" as const,
+        externalProductId: `prod-${i}`,
+        title: "Item",
+        status: "active" as const,
+        variants: [{ externalSkuId: `sku-${i}`, sku: `SKU-${i}`, externalInventoryId: null }],
+        updatedAt: null
+      })),
+      next: { value: null }
+    };
   }
   webhookHandlers(): Readonly<Record<string, never>> {
     return {};
   }
-  capabilities() {
+  capabilities(): ChannelCapabilities {
     return {
       supportsOrderPull: true,
-      supportsStockPush: false,
+      supportsStockPush: this.stockCapable,
       supportsWebhooks: false,
       supportsOrderAcknowledgement: false,
-      splitsOrderHistory: true
+      splitsOrderHistory: true,
+      supportsListingRead: true
     };
   }
 }
@@ -413,3 +432,119 @@ test("an unknown channel is a 404, not a crash", async () => {
     await h.close();
   }
 });
+
+/** Connects tnt-a with a stored credential, the precondition for the worker routes. */
+async function connect(h: Harness): Promise<void> {
+  await h.credentials.put({
+    tenantId: "tnt-a",
+    channel: "tiktok_tokopedia",
+    accessToken: "act.stored",
+    refreshToken: "rft.stored",
+    expiresAt: null,
+    context: { shopCipher: "cipher-stored" }
+  });
+}
+
+test("the order page route requires a service token", async () => {
+  const h = await startHarness();
+  try {
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+    assert.equal(response.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the order page route returns one page and an opaque next cursor", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.ordersInPage = 2;
+    h.connector.caughtUp = false;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { items: unknown[]; nextCursor: string | null };
+    assert.equal(body.items.length, 2);
+    // The workflow owns pagination; this plane returns the token, it does not walk the cursor.
+    assert.equal(body.nextCursor, "more");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the listings page route returns the normalised variants the mapping needs", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.listingsInPage = 1;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/listings/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { items: { variants: { sku: string | null }[] }[] };
+    assert.equal(body.items[0]?.variants[0]?.sku, "SKU-0");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the stock route refuses a channel that declares it cannot push stock", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    // The connector says so itself; the plane must not call it and hope.
+    h.connector.stockCapable = false;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/stock`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", items: [{ sku: "SKU-1", available: 5 }] })
+    });
+
+    assert.equal(response.status, 422);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "VALIDATION_FAILED");
+    assert.equal(h.connector.lastStockItems, null, "the connector was never called");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the stock route hands the connector the payload with its marketplace addresses", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.stockCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/stock`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({
+        tenantId: "tnt-a",
+        items: [{ sku: "SKU-1", available: 5, externalProductId: "prod-1", externalSkuId: "sku-1" }]
+      })
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(h.connector.lastStockItems, [
+      { sku: "SKU-1", available: 5, externalProductId: "prod-1", externalSkuId: "sku-1" }
+    ]);
+  } finally {
+    await h.close();
+  }
+});
+

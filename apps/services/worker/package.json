@@ -1,31 +1,25 @@
 {
-  "name": "@platform/control-plane",
+  "name": "@platform/worker",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Tenant registry, provisioning, identity. Owns who a tenant is, not what they sell.",
+  "description": "Workflow engine: order import, listing import, stock push, reconciliation. Never touches a tenant database (ADR 0010).",
   "exports": {
     ".": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "test:integration": "node --test test/integration/*.test.ts",
     "start": "node src/main.ts"
   },
   "dependencies": {
     "@platform/contracts": "workspace:*",
     "@platform/observability": "workspace:*",
-    "@platform/secrets": "workspace:*",
-    "@platform/sync-state": "workspace:*",
-    "@platform/tenant-client": "workspace:*",
-    "pg": "^8.13.1",
-    "zod": "^3.24.1"
+    "@platform/sync-state": "workspace:*"
   },
   "devDependencies": {
     "@platform/tsconfig": "workspace:*",
     "@types/node": "^22.10.1",
-    "@types/pg": "^8.11.10",
     "typescript": "^5.6.3"
   }
 }

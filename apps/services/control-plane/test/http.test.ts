@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { InMemorySecretStore } from "@platform/secrets";
+import { InMemorySyncStateStore } from "@platform/sync-state";
 import { InMemoryTenantStore } from "../src/tenant-store.ts";
 import { InMemoryTenantSchemaAdmin } from "../src/tenant-schema.ts";
 import { RecordingMigrationRunner } from "../src/migrations.ts";
@@ -33,8 +34,11 @@ interface Harness {
   store: InMemoryTenantStore;
   accounts: InMemoryAccountStore;
   schemaAdmin: InMemoryTenantSchemaAdmin;
+  syncState: InMemorySyncStateStore;
   close: () => Promise<void>;
 }
+
+const SERVICE_TOKEN = "service-token-value-for-tests";
 
 async function startHarness(): Promise<Harness> {
   const logger = createLogger("error", {}, () => {});
@@ -71,8 +75,17 @@ async function startHarness(): Promise<Harness> {
 
   const accounts = new InMemoryAccountStore();
   const sessions = new SessionManager({ accounts, now: () => NOW });
+  const syncState = new InMemorySyncStateStore();
 
-  const server = createControlPlaneServer({ registry, provisioning, termination, sessions, logger });
+  const server = createControlPlaneServer({
+    registry,
+    provisioning,
+    termination,
+    sessions,
+    syncState,
+    serviceTokens: [SERVICE_TOKEN],
+    logger
+  });
   await new Promise<void>((resolve) => server.listen(0, resolve));
   const { port } = server.address() as AddressInfo;
 
@@ -82,6 +95,7 @@ async function startHarness(): Promise<Harness> {
     store,
     accounts,
     schemaAdmin,
+    syncState,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -304,5 +318,124 @@ test("the API", async (t) => {
     });
     const healthBody = (await health.json()) as { servable: boolean };
     assert.equal(healthBody.servable, false);
+  });
+
+  await t.test("the sync-state surface requires a service token", async () => {
+    const withoutToken = await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId, channel: "shopee", externalOrderId: "ext-1" })
+    });
+    assert.equal(withoutToken.status, 401);
+
+    const withSessionToken = await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${operatorToken}` },
+      body: JSON.stringify({ tenantId, channel: "shopee", externalOrderId: "ext-1" })
+    });
+    // An operator session must not stand in for the worker's service token: different trust.
+    assert.equal(withSessionToken.status, 401);
+  });
+
+  await t.test("reserving an order ref twice returns the existing ref", async () => {
+    const call = async (): Promise<{ kind: string }> => {
+      const response = await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+        body: JSON.stringify({ tenantId, channel: "shopee", externalOrderId: "ext-route-1" })
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()) as { kind: string };
+    };
+
+    assert.equal((await call()).kind, "reserved");
+    assert.equal((await call()).kind, "exists");
+  });
+
+  await t.test("an unknown channel on the sync surface is a validation failure", async () => {
+    const response = await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId, channel: "not-a-channel", externalOrderId: "ext-1" })
+    });
+    assert.equal(response.status, 422);
+  });
+
+  await t.test("the sync surface commits an order ref and returns it", async () => {
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId, channel: "shopee", externalOrderId: "ext-commit" })
+    });
+    const response = await fetch(`${harness.baseUrl}/v1/sync/order-refs/commit`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId, channel: "shopee", externalOrderId: "ext-commit", orderId: "order-1" })
+    });
+
+    assert.equal(response.status, 200);
+    const ref = (await response.json()) as { status: string; orderId: string };
+    assert.equal(ref.status, "committed");
+    assert.equal(ref.orderId, "order-1");
+  });
+
+  await t.test("an idempotency key replays only with the same fingerprint", async () => {
+    const claim = async (fingerprint: string): Promise<{ status: number; body: { kind?: string; error?: { code: string } } }> => {
+      const response = await fetch(`${harness.baseUrl}/v1/sync/idempotency/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+        body: JSON.stringify({ tenantId, key: "k1", operation: "order.create", fingerprint })
+      });
+      return { status: response.status, body: (await response.json()) as { kind?: string; error?: { code: string } } };
+    };
+
+    assert.equal((await claim("fp-a")).body.kind, "claimed");
+    assert.equal((await claim("fp-a")).body.kind, "in_flight");
+    // Re-using a key for different input is a bug, not a retry.
+    const conflict = await claim("fp-b");
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.error?.code, "IDEMPOTENCY_CONFLICT");
+  });
+
+  await t.test("a SKU map can be stored and read back for the worker's stock push", async () => {
+    const write = await fetch(`${harness.baseUrl}/v1/sync/sku-maps/upsert`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({
+        tenantId,
+        channel: "shopee",
+        sku: "SKU-1",
+        externalProductId: "1001",
+        externalSkuId: "model-11",
+        externalInventoryId: null
+      })
+    });
+    assert.equal(write.status, 200);
+
+    const read = await fetch(`${harness.baseUrl}/v1/sync/sku-maps/${tenantId}/shopee/SKU-1`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    const body = (await read.json()) as { map: { externalSkuId: string } | null };
+    assert.equal(body.map?.externalSkuId, "model-11");
+  });
+
+  await t.test("a cursor round-trips and an unknown entity is a validation failure", async () => {
+    const set = await fetch(`${harness.baseUrl}/v1/sync/cursors/set`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId, channel: "shopee", entity: "orders", cursor: "tok-9" })
+    });
+    assert.equal(set.status, 200);
+
+    const get = await fetch(`${harness.baseUrl}/v1/sync/cursors/${tenantId}/shopee/orders`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    const body = (await get.json()) as { cursor: { cursor: string | null } | null };
+    assert.equal(body.cursor?.cursor, "tok-9");
+
+    const bad = await fetch(`${harness.baseUrl}/v1/sync/cursors/${tenantId}/shopee/nonsense`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(bad.status, 422);
   });
 });

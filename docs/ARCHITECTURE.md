@@ -84,9 +84,15 @@ plane and worker over HTTP with a service token — services never import each o
 
 Owns *executing work over time*.
 
-- Consumes queue jobs and runs workflows (order import, stock push, fulfillment sync).
+- Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
 - Runs the reconciliation scheduler.
 - Owns the Redis workflow engine connection.
+
+The workflows live in `@platform/worker` as functions that take ports, so the same unit runs under
+the engine and under a test. It orchestrates over HTTP: the control plane's sync-state surface for
+refs, idempotency and SKU maps; the integration plane for marketplace calls; each tenant's Medusa
+Admin API for commerce writes. It never imports a connector, never imports Medusa, and never touches
+a tenant database (ADR 0010). The engine itself is M4 — until it lands, nothing runs on a timer.
 
 ### Data plane (per tenant)
 
@@ -108,6 +114,11 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 | `packages/secrets` | KMS-backed secret access, and the typed `CredentialStore` over it | `contracts` |
 | `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
 | `packages/rate-governor` | Central marketplace rate-limit scheduling: one budget per app key, one per seller | `contracts` |
+| `packages/sync-state` | Platform-owned sync state: external-order refs, idempotency records, SKU→channel maps, cursors | `contracts` |
+
+`packages/sync-state` is the platform's half of the order/stock pipeline. It stores only stitched
+identifiers and cursors, never product, order, or stock data — that stays in the tenant data plane.
+Its interface is exposed by the control plane and reached by the worker over HTTP (ADR 0010).
 
 ## 3. Key flows
 
@@ -133,15 +144,17 @@ Marketplace webhook
   -> integration-plane verifies signature
   -> raw event persisted (dedup key = channel + event_id)
   -> job enqueued, HTTP 200 returned
-  -> worker runs import workflow:
-       step 1: upsert external order ref  (unique: tenant_id, channel, external_order_id)
-       step 2: create Medusa order via tenant-client
-       step 3: reserve inventory at the mapped stock location
-       step 4: emit internal event for downstream (WMS pick task, notification)
-     compensation: release reservation, mark import failed for reconciliation retry
+  -> worker runs import workflow (M3 also runs this pull-only, by cursor):
+       step 1: reserve external order ref  (unique: tenant_id, channel, external_order_id)
+       step 2: create Medusa order via the tenant's Admin API, with an idempotency key
+       step 3: commit the ref (M4 adds reservation-at-a-stock-location and the pick task)
+     compensation: find the order by channel-order-link, release it, mark the ref failed
 ```
 
-Duplicate delivery hits the unique constraint in step 1 and becomes a no-op. See ADR 0002.
+Duplicate delivery finds a committed ref in step 1 and becomes a no-op. A redelivery whose Medusa
+order exists but whose ref was never committed replays through the same idempotency key instead of
+creating a second order. See ADR 0002 and ADR 0010. The cursor advances only after a page is fully
+committed, so a crash re-reads the page rather than skipping orders.
 
 ### 3.3 Stock changes in our system
 
@@ -149,23 +162,32 @@ Duplicate delivery hits the unique constraint in step 1 and becomes a no-op. See
 Stock mutation (sale, return, stock adjustment, inbound PO)
   -> internal event emitted
   -> worker runs stock-push workflow per connected channel:
-       step 1: persist idempotency record
-       step 2: connector.pushStock()
-       step 3: record result; on rate limit -> reschedule via governor
-     compensation: none needed (idempotent), but failures are recorded for reconciliation
+       step 1: resolve each SKU's channel address from the stored listing map (ADR 0009)
+       step 2: claim idempotency record keyed by the payload digest
+       step 3: connector.pushStock() via the integration plane
+       step 4: record result; on rate limit -> reschedule via governor
+     compensation: none needed (an absolute stock set is idempotent), but failures are recorded
 ```
+
+A SKU with no stored mapping is refused as `unknown_sku`, never pushed to a guessed address. A
+re-push of unchanged values replays the recorded result and makes no second call.
 
 ### 3.4 Reconciliation (runs regardless of webhook health)
 
 ```
 scheduler -> per tenant, per channel, per entity type:
-  pull by cursor (orders, stock snapshot)
+  pull by cursor (orders, listings, stock snapshot)
   diff against local state
   repair drift via the same idempotent workflows
   advance cursor only after successful commit
 ```
 
 Reconciliation is the source of truth. Webhooks are an optimization. See ADR 0002.
+
+Repair reuses the exact workflows above rather than a second implementation: listing import stores
+the SKU→variant map, order import re-reads its cursor window and dedups on the order ref, and stock
+push replays or re-pushes through the payload-keyed idempotency record. A repair path that differed
+from the live path would be a second place to get idempotency wrong.
 
 ## 4. Tenant isolation
 
@@ -197,6 +219,7 @@ packages/                   # stable shared libraries — few, slow to change
   tenant-client/
   secrets/
   observability/
+  sync-state/
 connectors/                 # adapters — volatile, one package per channel
   tiktok-tokopedia/
   shopee/                   # built early, ahead of its M8 milestone

@@ -1,5 +1,6 @@
 import type {
   ChannelCode,
+  ChannelListing,
   ChannelOrder,
   Cursor,
   Instant,
@@ -34,6 +35,16 @@ export interface ChannelConnector {
 
   /** Pull a page of orders. The cursor is opaque outside this connector. */
   fetchOrders(cursor: Cursor, credential: Credential): Promise<Page<ChannelOrder>>;
+
+  /**
+   * Pull a page of listings, so our SKUs can be mapped to the identifiers a stock push needs
+   * (docs/adr/0009). The cursor is opaque outside this connector, like the order cursor.
+   *
+   * A channel that addresses variants by our SKU directly may return one variant per product; a
+   * channel that assigns its own ids must return them here. Declaring support is
+   * `capabilities().supportsListingRead`.
+   */
+  fetchListings(cursor: Cursor, credential: Credential): Promise<Page<ChannelListing>>;
 
   /** Tell the marketplace we have accepted an order, when the channel requires it. */
   acknowledgeOrder(externalOrderId: string, credential: Credential): Promise<void>;
@@ -107,4 +118,6 @@ export interface ChannelCapabilities {
   readonly supportsOrderAcknowledgement: boolean;
   /** True when order history must be read from a second API (see docs/adr/0003). */
   readonly splitsOrderHistory: boolean;
+  /** True when the channel exposes listings we can read to map our SKUs (docs/adr/0009). */
+  readonly supportsListingRead: boolean;
 }

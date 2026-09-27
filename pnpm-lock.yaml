@@ -32,6 +32,9 @@ importers:
       '@platform/secrets':
         specifier: workspace:*
         version: link:../../../packages/secrets
+      '@platform/sync-state':
+        specifier: workspace:*
+        version: link:../../../packages/sync-state
       '@platform/tenant-client':
         specifier: workspace:*
         version: link:../../../packages/tenant-client
@@ -78,6 +81,28 @@ importers:
       zod:
         specifier: ^3.24.1
         version: 3.25.76
+    devDependencies:
+      '@platform/tsconfig':
+        specifier: workspace:*
+        version: link:../../../tooling/tsconfig
+      '@types/node':
+        specifier: ^22.10.1
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  apps/services/worker:
+    dependencies:
+      '@platform/contracts':
+        specifier: workspace:*
+        version: link:../../../packages/contracts
+      '@platform/observability':
+        specifier: workspace:*
+        version: link:../../../packages/observability
+      '@platform/sync-state':
+        specifier: workspace:*
+        version: link:../../../packages/sync-state
     devDependencies:
       '@platform/tsconfig':
         specifier: workspace:*
@@ -182,6 +207,22 @@ importers:
         version: 5.9.3
 
   packages/secrets:
+    dependencies:
+      '@platform/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@platform/tsconfig':
+        specifier: workspace:*
+        version: link:../../tooling/tsconfig
+      '@types/node':
+        specifier: ^22.10.1
+        version: 22.20.4
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/sync-state:
     dependencies:
       '@platform/contracts':
         specifier: workspace:*

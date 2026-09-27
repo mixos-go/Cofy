@@ -1,0 +1,22 @@
+{
+  "name": "@platform/sync-state",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Platform-owned channel sync state: order refs, idempotency, cursors, SKU maps (ADR 0010).",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

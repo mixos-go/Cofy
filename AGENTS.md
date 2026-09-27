@@ -68,6 +68,7 @@ connectors/*              ->  packages/channel-sdk, packages/contracts
 packages/channel-sdk      ->  packages/contracts
 packages/tenant-client    ->  packages/contracts
 packages/secrets          ->  packages/contracts
+packages/sync-state       ->  packages/contracts
 packages/contracts        ->  (IMPORTS NOTHING)
 
 data-plane/*              ->  (runs INSIDE the tenant's Medusa instance, not in our services)
@@ -84,6 +85,9 @@ Enforced rules:
   `channel-sdk` only.
 - **`data-plane/*` must not import from `apps/`, `packages/`, or `connectors/`.** It runs under
   Medusa inside the tenant instance and may depend only on Medusa's own packages.
+- **`worker` must not import a connector or Medusa.** It orchestrates workflows and reaches
+  marketplaces through the integration plane and a tenant's commerce engine through its own HTTP
+  API (ADR 0010). `worker` imports `packages/*` only.
 - Each package has its own `package.json` with explicit `exports`. No deep imports into internal
   files (`../../src/internal/foo`).
 
@@ -277,3 +281,35 @@ when a channel teaches us something the contract cannot express.
   once with placeholder credentials: if the gateway answers an app_key/credential error rather than a
   transport or signature error, the wiring, signing and host are proven before real credentials
   exist. The script must read secrets from the environment, never write them, and mask them in output.
+
+---
+
+## 10. Lessons from the order/stock write path
+
+Hard-won specifics from building `packages/sync-state` and `apps/services/worker`. Same rule as
+§9: add here when a write path teaches us something the contract cannot express.
+
+- **A service-only surface must be closed when its token is unset, and a session token is not a
+  substitute.** The control plane's `/v1/sync/*` routes authenticate the worker by a service token
+  (ADR 0008's shape). An operator session is a different trust level and must not open that surface.
+  Test both the missing-token and the wrong-kind-of-token case, or the surface is open by accident.
+- **Claim the sync-state ref before the commerce write, and treat `reserved` as "not a duplicate".**
+  Only a `committed` ref short-circuits. A `reserved` or `in_flight` claim means another attempt may
+  be mid-write; a second run must not race it into a second order. The idempotency record is the
+  proof of what happened, never the worker's memory.
+- **Compensation must find the order through the data plane's link table, not through worker state.**
+  A crash before the ref is committed is exactly the case where memory is gone. Read
+  `channel-order-link` (ADR 0010 point 3) via the tenant's API to learn whether a create landed;
+  release it, then mark the ref failed.
+- **One fixed idempotency key per SKU (or per order) is wrong for a repeatable absolute write.**
+  The second stock change would collide with the first as `IDEMPOTENCY_CONFLICT`. Key the record by a
+  digest of the payload: an unchanged re-push replays, a changed value is a new operation.
+- **Advance a pull cursor only after the whole page committed.** Advance earlier and a crash skips
+  orders silently; the ref/idempotency checks make a re-read of the page a no-op, so re-reading is
+  always the safe direction.
+- **Record a partial marketplace success as failed.** A batch where some items were rejected must
+  not be replayed as done on the next attempt; a happy-path-only success assertion is how a
+  rejected SKU disappears.
+- **Node's strip-only TypeScript rejects parameter properties.** `constructor(private readonly x)`
+  throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` under `node --test`. Use an explicit field
+  assignment, matching §5.

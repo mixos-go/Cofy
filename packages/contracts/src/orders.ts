@@ -35,6 +35,14 @@ export interface ChannelOrderTotals {
 export interface StockUpdate {
   readonly sku: string;
   readonly available: number;
+  /**
+   * Marketplace identifiers resolved from a listing import (docs/adr/0009). The workflow fills these
+   * from the stored SKU→variant mapping; a connector never looks them up (it is pure, ADR 0005).
+   * All are absent when no mapping exists yet, which becomes `unknown_sku` rather than a wrong push.
+   */
+  readonly externalProductId?: string;
+  readonly externalSkuId?: string;
+  readonly externalInventoryId?: string;
 }
 
 export interface StockResult {

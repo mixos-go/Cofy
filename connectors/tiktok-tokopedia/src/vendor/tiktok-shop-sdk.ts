@@ -12,3 +12,7 @@ export { exchangeAuthCode, refreshAccessToken, buildAuthUrl } from "../../vendor
 export type { TikTokCredentials, TokenResponse } from "../../vendor/tiktok-shop-sdk/dist/index.js";
 export type { GetOrderListBody } from "../../vendor/tiktok-shop-sdk/dist/generated/Order/index.js";
 export type { GetAuthorizedShopsResponse } from "../../vendor/tiktok-shop-sdk/dist/generated/Authorization/index.js";
+export type {
+  SearchProductsBody,
+  UpdateInventoryRequest
+} from "../../vendor/tiktok-shop-sdk/dist/generated/Product/index.js";

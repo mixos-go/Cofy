@@ -15,6 +15,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { PlatformError, httpStatusFor } from "@platform/contracts";
 import type { ChannelCode } from "@platform/contracts";
+import type { ChannelConnector } from "@platform/channel-sdk";
 import { z } from "zod";
 import { ChannelRegistry } from "./channels.ts";
 import type { IntegrationPlaneOptions } from "./types.ts";
@@ -50,6 +51,61 @@ const authorizeBody = z.object({
 const probeBody = z.object({
   tenantId: z.string().min(1).max(64)
 });
+
+/**
+ * The worker's three calls into this plane. Each is one page or one batch, never a walk: the
+ * workflow owns pagination and rescheduling, this plane owns "talk to the marketplace"
+ * (AGENTS.md §4). Cursors and stock items are opaque contracts, so no marketplace shape crosses
+ * this boundary.
+ */
+const pageBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  cursor: z.string().nullable().default(null)
+});
+
+const stockPushBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  items: z
+    .array(
+      z.object({
+        sku: z.string().min(1),
+        available: z.number().int().nonnegative(),
+        externalProductId: z.string().min(1).optional(),
+        externalSkuId: z.string().min(1).optional(),
+        externalInventoryId: z.string().min(1).optional()
+      })
+    )
+    .min(1)
+    .max(200)
+});
+
+/** Load the credential for a tenant and channel, or fail as disconnected. */
+async function credentialFor(
+  options: IntegrationPlaneOptions,
+  tenantId: string,
+  channel: ChannelCode
+) {
+  const stored = await options.credentials.get({ tenantId, channel });
+  if (stored === null) {
+    throw new PlatformError("CHANNEL_DISCONNECTED", "This tenant has not connected the channel.", {
+      details: { tenantId, channel }
+    });
+  }
+  return stored;
+}
+
+async function requireCapability(
+  connector: ChannelConnector,
+  capability: "supportsOrderPull" | "supportsListingRead" | "supportsStockPush"
+): Promise<void> {
+  // A connector declares what it can do (AGENTS.md §4). Calling past a `false` would either throw
+  // from the connector or, worse, look like an empty success; refusing here makes it a clear error.
+  if (!connector.capabilities()[capability]) {
+    throw new PlatformError("VALIDATION_FAILED", `This channel does not support ${capability}.`, {
+      details: { capability }
+    });
+  }
+}
 
 function channelParam(params: Readonly<Record<string, string>>): ChannelCode {
   const channel = params.channel;
@@ -165,6 +221,51 @@ export function createRoutes(
           ordersInFirstPage: page.items.length,
           caughtUp: page.next.value === null
         };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/channels/:channel/orders/page",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = pageBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsOrderPull");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const page = await connector.fetchOrders({ value: parsed.cursor }, credential);
+        return { items: page.items, nextCursor: page.next.value };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/channels/:channel/listings/page",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = pageBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsListingRead");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const page = await connector.fetchListings({ value: parsed.cursor }, credential);
+        return { items: page.items, nextCursor: page.next.value };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/channels/:channel/stock",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = stockPushBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsStockPush");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const results = await connector.pushStock(parsed.items, credential);
+        return { results };
       }
     }
   ];

@@ -284,10 +284,17 @@ and stock propagates back without overselling.
 - Rate-limit governor: **done** — `packages/rate-governor`, 12 tests with a fake clock (shared
   app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown).
 - Connector listing read (required before stock push): **designed, awaiting approval** — ADR 0009.
+  Connectors and the `ChannelConnector` interface implement it; the interface change is still
+  frozen-pending.
 - Sync state location and commerce write path: **designed, awaiting approval** — ADR 0010.
-- Order import, listing import, stock push, `data-plane/modules/channel-order-link`: not started,
-  blocked on the two ADRs above (both are `AGENTS.md` §8 stop-and-ask items: a frozen shared
-  interface, and tenant data access).
+- `packages/sync-state` (ADR 0010 data shape): **done** — external-order refs, payload-keyed
+  idempotency records, SKU→channel maps, cursors; 16 tests. Control plane exposes it over HTTP
+  behind a service token (7 route tests).
+- Order import, listing import, stock push workflows: **done against the ADR 0010 design** —
+  `apps/services/worker`, 15 tests. Each is a function over ports, so it runs unchanged under the
+  M4 engine. None of it is enabled in a running process until the ADRs are approved.
+- `data-plane/modules/channel-order-link`: not started — blocked on ADR 0010 approval (tenant data
+  access is an `AGENTS.md` §8 stop-and-ask). The worker reaches it over the tenant's Admin API.
 
 **Deliverables**
 
@@ -310,14 +317,33 @@ and stock propagates back without overselling.
 
 **Exit criteria**
 
+Boundary note: the four criteria below are proven at the **port boundary** — the workflows, the sync
+state, and the invariants they hold are real code under test, while the marketplace and the tenant
+Medusa are fakes (AGENTS.md §6 permits this for external boundaries). They are *not yet* proven
+against a live channel and a live Medusa, because that write path (ADR 0010) is unapproved. The
+evidence line names the exact test; treat a checked box as "correct at the boundary", not "shipped".
+
 - [ ] A real order placed on the channel appears in the tenant's Medusa with correct line items,
-      totals and inventory reservation. *(Line items are one unit each; see M2's known limit.)*
+      totals and inventory reservation. *(Boundary evidence: `worker/test/order-import.test.ts` —
+      "an order placed on the channel lands in Medusa with its lines and a reservation". The
+      reservation ledger is real; the Medusa HTTP call is a fake. Line items are one unit each; see
+      M2's known limit.)*
 - [ ] Re-running the import for the same order (same pull window, twice) creates exactly one order.
+      *(Boundary evidence: "re-running the import for the same order creates exactly one order" —
+      the second run reports `skipped: 1` and the ledger moves once.)*
 - [ ] A sale in Medusa propagates to the channel and reduces available stock there, via a listing
-      import mapping that resolves the channel `sku_id`.
+      import mapping that resolves the channel `sku_id`. *(Boundary evidence: "a sale in Medusa
+      propagates to the channel through the listing mapping" — the push carries
+      `externalProductId`/`externalSkuId` resolved from the stored map, not just the SKU.)*
 - [ ] Concurrent orders across channels never oversell (prove with a concurrency test).
+      *(Boundary evidence: "concurrent imports of the same order do not oversell or double-create" —
+      two racing imports yield one order and five units reserved once; "an order that would oversell
+      is refused, and the first order keeps its reservation" — four + four against five on hand
+      leaves one.)*
 - [ ] Compensation test: fail the workflow after order creation, assert reservation is released
-      and no orphan order remains.
+      and no orphan order remains. *(Boundary evidence: "a failure after order creation releases the
+      reservation and marks the ref failed" — the order is found via `channel-order-link`, released,
+      and the ref is `failed` with `order.import_failed` published.)*
 - [x] Rate-limit governor holds under a simulated burst without exceeding the app budget.
       *(evidence: `pnpm --filter @platform/rate-governor test` — 12 tests, 0 failures, fake clock.
       `governor.test.ts`: "a burst within the app budget is allowed and the budget is spent",
@@ -332,6 +358,18 @@ and stock propagates back without overselling.
   for M3; the Redis-backed store lands behind the same interface before horizontal scaling.
 - The governor reschedules; it does not yet know the workflow engine's retry semantics, because
   the worker does not exist. Wiring is part of the import/push workflows below.
+- Sync state is in-memory in the running control plane (`InMemorySyncStateStore`), matching the
+  service's existing default of "starts with no infrastructure". Every invariant above is enforced
+  by that store's real logic, but a restart drops it; the Postgres-backed store lands behind the
+  same interface (ADR 0010) before any durable deployment.
+- An idempotency claim that is left `in_flight` by a crashed attempt is never expired. A later
+  import of that order is skipped, not retried, until reconciliation clears it. The claim needs an
+  expiry/steal policy, which is M4's reconciliation work, not a silent gap.
+- The stock-push idempotency key is a digest of the pushed payload. That makes an unchanged re-push
+  a replay and a changed value a new operation (both tested), but it also means two *different*
+  channels' pushes are separate keys by construction, and a partially-rejected batch is recorded as
+  failed so a retry re-pushes the whole batch. Fine for M3's volumes; revisit with per-item records
+  if a channel starts rejecting single items persistently.
 
 **Non-goals**
 

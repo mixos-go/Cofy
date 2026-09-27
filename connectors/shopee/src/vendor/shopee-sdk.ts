@@ -31,6 +31,11 @@ export type {
   GetOrderDetailResponse
 } from "../../vendor/shopee-sdk/dist/generated/Order/index.js";
 export type {
+  GetItemListRequest,
+  GetModelListRequest,
+  UpdateStockRequest
+} from "../../vendor/shopee-sdk/dist/generated/Product/index.js";
+export type {
   GetAccessTokenRequest,
   GetAccessTokenResponse,
   RefreshAccessTokenRequest,

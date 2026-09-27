@@ -369,15 +369,16 @@ test("a business error code becomes a non-retryable upstream error", async () =>
   );
 });
 
-test("capabilities are declared honestly, including the unsupported webhooks", () => {
+test("capabilities advertise the implemented listing read and stock push", () => {
   const connector = new TikTokConnector(makeConfig(transport([{}]).fetch));
 
   assert.deepEqual(connector.capabilities(), {
     supportsOrderPull: true,
-    supportsStockPush: false,
+    supportsStockPush: true,
     supportsWebhooks: false,
     supportsOrderAcknowledgement: false,
-    splitsOrderHistory: true
+    splitsOrderHistory: true,
+    supportsListingRead: true
   });
 });
 
@@ -386,14 +387,102 @@ test("no webhook handlers are exposed while verification is unimplemented", () =
   assert.deepEqual(Object.keys(connector.webhookHandlers()), []);
 });
 
-test("pushStock reports a per-item rejection instead of pretending to succeed", async () => {
-  const connector = new TikTokConnector(makeConfig(transport([{}]).fetch));
+test("pushStock rejects an unmapped SKU as unknown_sku without calling TikTok", async () => {
+  const t = transport([{ code: 0, data: {} }]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
 
   const results = await connector.pushStock([{ sku: "SKU-1", available: 4 }], credential);
 
   assert.equal(results.length, 1);
   assert.equal(results[0]?.accepted, false);
-  assert.equal(results[0]?.reason, "channel_error");
+  assert.equal(results[0]?.reason, "unknown_sku");
+  // An unmapped SKU has no address, so nothing may reach the network.
+  assert.equal(t.urls.length, 0);
+});
+
+test("pushStock accepts a mapped SKU and sends the resolved product, sku and warehouse", async () => {
+  const t = transport([{ code: 0, data: {} }]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const results = await connector.pushStock(
+    [{ sku: "SKU-1", available: 7, externalProductId: "p1", externalSkuId: "s1", externalInventoryId: "w1" }],
+    credential
+  );
+
+  assert.deepEqual(results, [{ sku: "SKU-1", accepted: true, reason: null }]);
+  const sent = JSON.parse(t.bodies[0] ?? "{}") as { skus?: readonly { id?: string }[] };
+  assert.equal(sent.skus?.[0]?.id, "s1");
+});
+
+test("pushStock reports channel_error for a SKU TikTok rejected inside a success envelope", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(transport([{ code: 0, data: { errors: [{ detail: [{ sku_id: "s1" }] }] } }]).fetch)
+  );
+
+  const results = await connector.pushStock(
+    [{ sku: "SKU-1", available: 1, externalProductId: "p1", externalSkuId: "s1" }],
+    credential
+  );
+
+  assert.deepEqual(results, [{ sku: "SKU-1", accepted: false, reason: "channel_error" }]);
+});
+
+test("fetchListings maps marketplace ids, seller SKU and warehouse into the platform shape", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(
+      transport([
+        {
+          code: 0,
+          data: {
+            products: [
+              {
+                id: "p1",
+                title: "Kaos",
+                status: "ACTIVATE",
+                update_time: 1_700_000_000,
+                skus: [{ id: "s1", seller_sku: "SKU-1", inventory: [{ warehouse_id: "w1", quantity: 3 }] }]
+              }
+            ],
+            next_page_token: ""
+          }
+        }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchListings({ value: null }, credential);
+
+  assert.equal(page.items.length, 1);
+  assert.equal(page.items[0]?.externalProductId, "p1");
+  assert.equal(page.items[0]?.status, "active");
+  assert.deepEqual(page.items[0]?.variants, [
+    { externalSkuId: "s1", sku: "SKU-1", externalInventoryId: "w1" }
+  ]);
+  // A short page with no token is "caught up", the one cursor convention (AGENTS.md §9).
+  assert.equal(page.next.value, null);
+});
+
+test("fetchListings treats an unknown status as unknown, never as active", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(transport([{ code: 0, data: { products: [{ id: "p1", status: "SOMETHING_NEW", skus: [] }] } }]).fetch)
+  );
+
+  const page = await connector.fetchListings({ value: null }, credential);
+
+  assert.equal(page.items[0]?.status, "unknown");
+});
+
+test("fetchListings returns a resumable cursor while a page token remains", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(transport([{ code: 0, data: { products: [{ id: "p1", skus: [] }], next_page_token: "tok-2" } }]).fetch)
+  );
+
+  const page = await connector.fetchListings({ value: null }, credential);
+
+  assert.notEqual(page.next.value, null);
+  // The cursor must round-trip: the connector only ever reads back what it wrote.
+  const resumed = await connector.fetchListings(page.next, credential);
+  assert.equal(resumed.items.length, 1);
 });
 
 test("acknowledgeOrder fails loudly because the channel has no such operation", async () => {

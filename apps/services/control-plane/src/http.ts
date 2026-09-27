@@ -17,9 +17,11 @@
 
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { PlatformError, httpStatusFor } from "@platform/contracts";
-import type { Capability, TenantId, TenantPlan, RegionCode } from "@platform/contracts";
+import type { Capability, ChannelCode, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
+import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
 import type { SessionManager } from "./identity.ts";
 import { authorize } from "./identity.ts";
@@ -27,9 +29,10 @@ import type { TenantRegistry } from "./tenants.ts";
 import type { ProvisioningOrchestrator } from "./provisioning.ts";
 import type { TenantTerminationService } from "./termination.ts";
 
-/** A route either requires a session, or is explicitly public. There is no default. */
+/** A route either requires a session, a service token, or is explicitly public. No default. */
 type AuthRequirement =
   | { readonly kind: "public" }
+  | { readonly kind: "service" }
   | { readonly kind: "session"; readonly capability: Capability; readonly scope: "self" | "tenant" };
 
 export interface RouteContext {
@@ -60,12 +63,76 @@ const loginBody = z.object({
   password: z.string().min(1)
 });
 
+/** Bodies and params for the worker-facing sync-state surface (ADR 0010). */
+const syncOrderRefBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  externalOrderId: z.string().min(1).max(200)
+});
+
+const syncCommitBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  externalOrderId: z.string().min(1).max(200),
+  orderId: z.string().min(1).max(200)
+});
+
+const syncIdempotencyClaimBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  key: z.string().min(1).max(200),
+  operation: z.string().min(1).max(120),
+  fingerprint: z.string().min(1).max(200)
+});
+
+const syncIdempotencyCompleteBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  key: z.string().min(1).max(200),
+  outcome: z.enum(["succeeded", "failed"]),
+  result: z.unknown().optional()
+});
+
+const skuMapBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  sku: z.string().min(1).max(200),
+  externalProductId: z.string().min(1).max(200),
+  externalSkuId: z.string().min(1).max(200),
+  externalInventoryId: z.string().min(1).max(200).nullable().default(null)
+});
+
+const cursorBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  cursor: z.string().max(4000).nullable()
+});
+
 export interface ControlPlaneApiOptions {
   readonly registry: TenantRegistry;
   readonly provisioning: ProvisioningOrchestrator;
   readonly termination: TenantTerminationService;
   readonly sessions: SessionManager;
+  /** Platform-owned channel sync state (ADR 0010). The worker reaches it only through these routes. */
+  readonly syncState: SyncStateStore;
+  /** Bearer tokens the worker presents. Empty means the sync-state surface is closed. */
+  readonly serviceTokens: readonly string[];
   readonly logger: Logger;
+}
+
+/**
+ * Compare in constant time and without early exit on length.
+ *
+ * A plain `===` leaks how much of a token matched via timing, enough to recover a token byte by
+ * byte. `timingSafeEqual` needs equal-length buffers, so the length is folded into the result
+ * rather than returning early, and every candidate is compared so timing does not reveal which
+ * one matched.
+ */
+function isAuthorizedServiceToken(presented: string | null, allowed: readonly string[]): boolean {
+  if (presented === null) return false;
+  const presentedBytes = Buffer.from(presented, "utf8");
+  let matched = false;
+  for (const candidate of allowed) {
+    const candidateBytes = Buffer.from(candidate, "utf8");
+    const equal =
+      presentedBytes.length === candidateBytes.length && timingSafeEqual(presentedBytes, candidateBytes);
+    matched = matched || equal;
+  }
+  return matched;
 }
 
 export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] {
@@ -159,8 +226,153 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
       path: "/v1/tenants/:tenantId",
       auth: { kind: "session", capability: "tenant:terminate", scope: "tenant" },
       handler: async ({ params }) => termination.terminate(params.tenantId ?? "")
+    },
+
+    // --- Worker-facing sync state (ADR 0010). Service-token auth; never a seller session. ---
+    {
+      method: "POST",
+      path: "/v1/sync/order-refs/reserve",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncOrderRefBody.parse(body);
+        return options.syncState.reserveOrderRef({
+          tenantId: parsed.tenantId,
+          channel: channelFromBody(body),
+          externalOrderId: parsed.externalOrderId,
+          now: new Date().toISOString()
+        });
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/order-refs/commit",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncCommitBody.parse(body);
+        return options.syncState.commitOrderRef(
+          parsed.tenantId,
+          channelFromBody(body),
+          parsed.externalOrderId,
+          parsed.orderId,
+          new Date().toISOString()
+        );
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/order-refs/fail",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncOrderRefBody.parse(body);
+        return options.syncState.failOrderRef(
+          parsed.tenantId,
+          channelFromBody(body),
+          parsed.externalOrderId,
+          new Date().toISOString()
+        );
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/idempotency/claim",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncIdempotencyClaimBody.parse(body);
+        return options.syncState.claimIdempotency({ ...parsed, now: new Date().toISOString() });
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/idempotency/complete",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncIdempotencyCompleteBody.parse(body);
+        return options.syncState.completeIdempotency({
+          tenantId: parsed.tenantId,
+          key: parsed.key,
+          outcome: parsed.outcome,
+          result: parsed.result ?? null,
+          now: new Date().toISOString()
+        });
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/sku-maps/upsert",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = skuMapBody.parse(body);
+        return options.syncState.upsertSkuMap({
+          ...parsed,
+          channel: channelFromBody(body),
+          updatedAt: new Date().toISOString()
+        });
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/sync/sku-maps/:tenantId/:channel/:sku",
+      auth: { kind: "service" },
+      handler: async ({ params }) =>
+        ({ map: await options.syncState.getSkuMap(params.tenantId ?? "", channelParam(params), params.sku ?? "") })
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/cursors/set",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = cursorBody.parse(body);
+        return options.syncState.setCursor({
+          tenantId: parsed.tenantId,
+          channel: channelFromBody(body),
+          entity: entityFromBody(body),
+          cursor: parsed.cursor,
+          now: new Date().toISOString()
+        });
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/sync/cursors/:tenantId/:channel/:entity",
+      auth: { kind: "service" },
+      handler: async ({ params }) =>
+        ({
+          cursor: await options.syncState.getCursor(
+            params.tenantId ?? "",
+            channelParam(params),
+            entityParam(params)
+          )
+        })
     }
   ];
+}
+
+/**
+ * `channel` and `entity` are read from the body but not constrained by the zod object above, so a
+ * bad value becomes a clear 422 rather than silently narrowing to the wrong channel.
+ */
+function channelFromBody(body: unknown): ChannelCode {
+  const channel = (body as { channel?: unknown }).channel;
+  if (channel !== "tiktok_tokopedia" && channel !== "shopee" && channel !== "lazada") {
+    throw new PlatformError("VALIDATION_FAILED", "A known channel is required.", { details: { channel } });
+  }
+  return channel;
+}
+
+function entityFromBody(body: unknown): SyncEntity {
+  const entity = (body as { entity?: unknown }).entity;
+  if (entity !== "orders" && entity !== "listings") {
+    throw new PlatformError("VALIDATION_FAILED", "A known sync entity is required.", { details: { entity } });
+  }
+  return entity;
+}
+
+function channelParam(params: Readonly<Record<string, string>>): ChannelCode {
+  return channelFromBody({ channel: params.channel });
+}
+
+function entityParam(params: Readonly<Record<string, string>>): SyncEntity {
+  return entityFromBody({ entity: params.entity });
 }
 
 function matchPath(pattern: string, path: string): Record<string, string> | null {
@@ -262,6 +474,10 @@ async function handle(
         if (session === null) {
           throw new PlatformError("UNAUTHENTICATED", "A valid session token is required.");
         }
+      }
+      if (route.auth.kind === "service" && !isAuthorizedServiceToken(bearerToken(request), options.serviceTokens)) {
+        // The service surface is closed when no tokens are configured, not open by default.
+        throw new PlatformError("UNAUTHENTICATED", "A valid service token is required.");
       }
 
       const targetTenantId = params.tenantId ?? session?.tenantId ?? null;

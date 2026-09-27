@@ -25,6 +25,8 @@ import { TenantTerminationService } from "./termination.ts";
 import { TenantRegistry } from "./tenants.ts";
 import { createControlPlaneServer } from "./http.ts";
 import { TenantClient } from "@platform/tenant-client";
+import { InMemorySyncStateStore } from "@platform/sync-state";
+import type { SyncStateStore } from "@platform/sync-state";
 
 async function main(): Promise<void> {
   const logger = createLogger((process.env.LOG_LEVEL as LogLevel | undefined) ?? "info");
@@ -94,6 +96,15 @@ async function main(): Promise<void> {
     ttlSeconds: Number(process.env.AUTH_SESSION_TTL_SECONDS ?? 43200)
   });
 
+  // Platform-owned channel sync state (ADR 0010). In-memory here so the service starts with no
+  // infrastructure; the Postgres-backed store lands behind this same interface when the registry
+  // database is wired in. The service tokens are the worker's credential to this surface.
+  const syncState: SyncStateStore = new InMemorySyncStateStore();
+  const serviceTokens = (process.env.CONTROL_PLANE_SERVICE_TOKENS ?? "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+
   if (process.env.BOOTSTRAP_OPERATOR_EMAIL !== undefined && process.env.BOOTSTRAP_OPERATOR_PASSWORD !== undefined) {
     await accounts.create({
       email: process.env.BOOTSTRAP_OPERATOR_EMAIL,
@@ -106,7 +117,15 @@ async function main(): Promise<void> {
     logger.info("startup.operator_created", {});
   }
 
-  const server = createControlPlaneServer({ registry, provisioning, termination, sessions, logger });
+  const server = createControlPlaneServer({
+    registry,
+    provisioning,
+    termination,
+    sessions,
+    syncState,
+    serviceTokens,
+    logger
+  });
   const port = Number(process.env.CONTROL_PLANE_PORT ?? 4001);
 
   server.listen(port, () => {
