@@ -18,13 +18,16 @@ This file is the **single source of truth for what we are building next**.
 |---|---|---|---|
 | M0 | Repo foundation & guardrails | Done (CI enforcement pending first PR) | — |
 | M1 | Tenant provisioning (control plane) | Done | M0 |
-| M2 | Channel connector: TikTok Shop + Tokopedia | In progress | M1 |
-| M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2 |
+| M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
+| M3 | Order import & stock sync (one channel, end-to-end) | Next | M2, E0 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
+
+E0 is a new prerequisite track (see below), not a milestone: a fixed egress IP and the
+integration-plane skeleton that every later milestone writes into.
 
 ---
 
@@ -209,7 +212,55 @@ are mechanical.
 
 **Non-goals**
 
-- No Shopee or Lazada connector. No listing/product upload to marketplace. No WMS.
+- No Lazada connector. No listing/product upload to marketplace. No WMS. *(Shopee was built early
+  and is tracked under M8; see the known limits above.)*
+
+---
+
+## E0 — Integration plane prerequisites (prerequisite track, not a milestone)
+
+**Why this exists.** M2 proved the connector against a live shop, and that surfaced two facts that
+must be settled before any marketplace write can run in production: the app enforces an **IP
+allowlist**, and the integration plane that would make calls **does not exist yet**.
+
+**Deliverables**
+
+- **Fixed egress IP**, registered in each marketplace app's allowlist. Without it every production
+  call is refused with a non-retryable `FORBIDDEN`, exactly as the sandbox was before the IP was
+  added. Decide and document the egress strategy (NAT/reserved IP) before M3 writes anything.
+- `apps/services/integration-plane` skeleton: HTTP entrypoint for OAuth callbacks and webhook
+  receipt, wired to `packages/secrets`, with a health endpoint. **No business logic yet** — it is
+  the place M3 writes into.
+- Channel-connection persistence: the control plane stores the `Credential` a connector returns
+  (encrypted, per tenant, per channel) and can hand it back to the connector. M2 returns a
+  credential object but nothing persists it outside the verification script.
+- A runnable local environment for the integration plane (compose service, env contract) so M3
+  can be tested without hand-writing egress configuration.
+
+**Exit criteria**
+
+- [ ] A live call from the integration plane reaches the business API without an allowlist refusal.
+- [ ] The integration plane starts, exposes health, and passes `pnpm boundaries`.
+- [ ] A credential produced by `completeAuthorization` is persisted, read back, and used to make a
+      live call — no test token pasted into an environment variable.
+- [ ] The egress IP is recorded in `docs/PLAN.md` and in each marketplace app's allowlist.
+
+**Non-goals**
+
+- No order import, no stock push, no webhook processing. Those are M3 and depend on this.
+
+**Open decisions (need a human call before M3 starts)**
+
+- **Egress strategy.** A NAT gateway with a static IP, or a reserved VM IP? One shared egress for
+  all tenants, or per-tenant? This decides the rate-limit governor's budget shape (ADR 0002 wants a
+  budget *per app key and per seller*) and whether one tenant can exhaust another's quota.
+- **Medusa fork question.** The repository has already decided **no fork** (ADR 0001: one vanilla
+  Medusa instance per tenant, no core-table changes, custom modules in `data-plane/`). If that is
+  still open at the platform level, it must be settled now — M3 is the first milestone that writes
+  into Medusa, and the answer changes M3's shape entirely. The plan below assumes the ADR stands.
+- **Where the product catalogue lives.** Stock push maps a local variant to a channel `sku_id`, so
+  the platform needs one authoritative catalogue. The assumption here is Medusa's product module in
+  the tenant data plane; if the intent is a platform-level catalogue instead, that is an ADR.
 
 ---
 
@@ -220,21 +271,30 @@ and stock propagates back without overselling.
 
 **Deliverables**
 
-- Webhook receiver: signature verification, raw event persistence, dedup, enqueue, fast return.
-- Redis workflow engine wired up (per ADR 0002) — no in-process cron anywhere.
-- Order import workflow with compensation: upsert external ref → create Medusa order → reserve
-  inventory at mapped stock location → emit internal event.
+- Order import (pull path only): a worker workflow that walks the connector's cursor, and for each
+  order resolves the tenant's channel connection, upserts an external reference, creates the Medusa
+  order, and reserves inventory. Webhooks are **out of scope here** — the TikTok connector declares
+  `supportsWebhooks: false` because the signature scheme is undocumented, so M3 must be correct
+  without them (M4 then adds reconciliation on top; see ADR 0002, where pull already outranks push).
+- Listing import (product ↔ channel SKU): `updateInventory` addresses items by a platform
+  `product_id`/`sku_id` that we only obtain from listing import, so stock push cannot exist without
+  it. This is the blocker that moved stock push out of M2.
 - Stock push workflow: idempotency record → connector push → result handling, with rate-limit
-  rescheduling via the governor.
+  rescheduling via the governor. Depends on listing import mapping a local variant to the channel's
+  `sku_id`.
 - Rate-limit governor: global budget per app key and per seller.
+- Medusa integration as a **data-plane module**, never a fork: implement `data-plane/modules/
+  channel-order-link` and register it via a module link (ADR 0001). No core Medusa table gains a
+  column; the tenant stays on a vanilla image.
 - Mapping layer: marketplace stock location ↔ Medusa stock location, per tenant.
 
 **Exit criteria**
 
-- [ ] A real order placed on the channel appears in the tenant's Medusa within the agreed SLO,
-      with correct line items, totals, and inventory reservation.
-- [ ] Delivering the same webhook twice creates exactly one order.
-- [ ] A sale in Medusa propagates to the channel and reduces available stock there.
+- [ ] A real order placed on the channel appears in the tenant's Medusa with correct line items,
+      totals and inventory reservation. *(Line items are one unit each; see M2's known limit.)*
+- [ ] Re-running the import for the same order (same pull window, twice) creates exactly one order.
+- [ ] A sale in Medusa propagates to the channel and reduces available stock there, via a listing
+      import mapping that resolves the channel `sku_id`.
 - [ ] Concurrent orders across channels never oversell (prove with a concurrency test).
 - [ ] Compensation test: fail the workflow after order creation, assert reservation is released
       and no orphan order remains.
@@ -242,7 +302,10 @@ and stock propagates back without overselling.
 
 **Non-goals**
 
-- No returns/exchanges. No fulfillment. No multi-channel. No WMS picking.
+- No returns/exchanges. No fulfillment. No multi-channel. No WMS picking. No marketplace webhooks
+  (TikTok's signature scheme is undocumented; do not guess one).
+- No listing **creation/upload** to the marketplace — import of listings we can already read is in
+  scope, publishing new products to a channel is not.
 
 ---
 
@@ -257,11 +320,15 @@ and stock propagates back without overselling.
 - Repair via the same idempotent workflows used by real-time paths (no second code path).
 - Cursor advance only after successful commit; safe re-run.
 - Drift metrics and alerting: drift rate, repair latency, unresolved drift count.
-- Retention policy for raw webhook events and idempotency records.
+- Retention policy for raw events and idempotency records.
+- **Only if a channel documents its webhook signature**: a webhook receiver (verify, persist raw,
+  dedup, enqueue, return fast). Until then reconciliation is the whole story, which ADR 0002 already
+  makes the source of truth.
 
 **Exit criteria**
 
-- [ ] With webhooks disabled entirely, reconciliation converges orders and stock within the SLO.
+- [ ] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
+      are not required, so this is the normal case today, not a degraded mode).
 - [ ] Injected drift (delete a local order, corrupt a stock level) is detected and repaired.
 - [ ] Reconciliation respects the rate-limit budget and never starves real-time operations.
 - [ ] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects.
