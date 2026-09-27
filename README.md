@@ -39,8 +39,20 @@ pnpm check          # typecheck + lint + test + boundaries
 pnpm boundaries     # enforce dependency direction and forbidden imports
 pnpm typecheck      # tsc --noEmit across all workspaces
 pnpm lint           # eslint
-pnpm test           # unit + contract tests
+pnpm test           # unit tests; needs no database
+pnpm test:integration  # isolation tests; needs Postgres (see below)
 ```
+
+The isolation tests in `apps/services/control-plane/test/integration/` connect to a real Postgres
+and create and drop their own schemas there; they never touch `public`. Point them at a database
+you are willing to treat as disposable:
+
+```bash
+TEST_DATABASE_URL=postgres://platform:platform@localhost:5432/platform_test pnpm test:integration
+```
+
+They skip themselves when `TEST_DATABASE_URL` is unset, so `pnpm check` stays usable without a
+database.
 
 Local infrastructure (Postgres, Redis):
 

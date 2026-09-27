@@ -12,6 +12,9 @@ export type PlatformErrorCode =
   | "CONFLICT"
   | "VALIDATION_FAILED"
   | "TENANT_NOT_FOUND"
+  | "TENANT_NOT_ACTIVE"
+  | "TENANT_STATE_INVALID"
+  | "PROVISIONING_FAILED"
   | "CHANNEL_DISCONNECTED"
   | "CHANNEL_RATE_LIMITED"
   | "CHANNEL_UNAVAILABLE"
@@ -66,9 +69,13 @@ export function httpStatusFor(code: PlatformErrorCode): number {
       return 404;
     case "CONFLICT":
     case "IDEMPOTENCY_CONFLICT":
+    case "TENANT_STATE_INVALID":
       return 409;
     case "VALIDATION_FAILED":
       return 422;
+    case "TENANT_NOT_ACTIVE":
+    case "PROVISIONING_FAILED":
+      return 503;
     case "CHANNEL_RATE_LIMITED":
       return 429;
     case "CHANNEL_DISCONNECTED":

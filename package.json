@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@9.12.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   },
   "scripts": {
     "typecheck": "pnpm -r --if-present typecheck",
@@ -12,7 +12,8 @@
     "test": "pnpm -r --if-present test",
     "test:integration": "pnpm -r --if-present test:integration",
     "boundaries": "pnpm --filter @platform/boundaries check",
-    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries"
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries",
+    "check:all": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries && pnpm test:integration"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

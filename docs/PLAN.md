@@ -16,8 +16,8 @@ This file is the **single source of truth for what we are building next**.
 
 | # | Milestone | Status | Depends on |
 |---|---|---|---|
-| M0 | Repo foundation & guardrails | In progress | — |
-| M1 | Tenant provisioning (control plane) | Not started | M0 |
+| M0 | Repo foundation & guardrails | Done (CI enforcement pending first PR) | — |
+| M1 | Tenant provisioning (control plane) | Done | M0 |
 | M2 | Channel connector: TikTok Shop + Tokopedia | Not started | M1 |
 | M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
@@ -89,11 +89,34 @@ codebase, before any business logic exists.
 
 **Exit criteria**
 
-- [ ] Provisioning a tenant is a single API call and completes end-to-end in a test.
-- [ ] Provisioning is resumable: kill it mid-way, re-run, end state is correct.
-- [ ] Migration fan-out reports per-tenant success/failure and can retry only the failures.
-- [ ] Tenant isolation test suite passes: tenant A cannot read tenant B data through any endpoint.
-- [ ] Terminating a tenant revokes credentials and schedules data deletion.
+- [x] Provisioning a tenant is a single API call and completes end-to-end in a test. *(verified:
+      `test/http.test.ts` creates a tenant over HTTP and asserts it reaches `active`; also verified
+      against a running process — `POST /v1/tenants` returned a tenant that reached `active` with
+      all five provisioning steps logged at attempt 1)*
+- [x] Provisioning is resumable: a run interrupted by a failed step can be re-run to a correct end
+      state without repeating work that already succeeded. *(verified: `test/provisioning.test.ts`
+      asserts succeeded steps keep attempt 1 and are not re-executed, while the failed step is
+      retried at attempt 2 and the migration runs exactly once)*
+- [x] Migration fan-out reports per-tenant success/failure and can retry only the failures.
+      *(verified: `test/migration-fanout.test.ts`, including the case where one tenant fails and the
+      remaining tenants still run)*
+- [x] Tenant isolation test suite passes: tenant A cannot read tenant B data through any endpoint.
+      *(verified against a real Postgres: `test/integration/tenant-isolation.test.ts` proves
+      unqualified table names resolve per schema and `search_path` stays pinned across pooled
+      connections. HTTP-level scope checks are covered by `test/http.test.ts`)*
+- [x] Terminating a tenant revokes credentials and schedules data deletion. *(verified:
+      `test/tenants.test.ts` asserts credentials are revoked before the state change, that the data
+      is scheduled rather than dropped, and that a failure after revocation leaves no live
+      credentials and a still-active tenant for retry)*
+
+**Known limits carried into M2**
+
+- A run interrupted by a *process kill* (rather than a step that throws) is recovered by the same
+  resume path, but is not covered by an automated test: the in-memory store cannot simulate a
+  store write that survives the process that made it. The integration suite is the right place for
+  that once the store is Postgres-backed.
+- Only one tenant's provisioning runs at a time per process. Concurrency across processes is not
+  yet coordinated.
 
 **Non-goals**
 

@@ -1,4 +1,4 @@
-import type { ChannelCode, Instant, Money, OrderId } from "./ids.js";
+import type { ChannelCode, Instant, Money, OrderId } from "./ids.ts";
 
 /**
  * The normalised shape of an order pulled from any marketplace.

@@ -16,7 +16,9 @@ export const PLATFORM_EVENTS = {
   /** A channel credential was revoked by the seller or by the marketplace. */
   CHANNEL_DISCONNECTED: "channel.disconnected",
   /** A tenant finished provisioning and is ready to serve. */
-  TENANT_PROVISIONED: "tenant.provisioned"
+  TENANT_PROVISIONED: "tenant.provisioned",
+  /** A tenant was terminated and its data is scheduled for deletion. */
+  TENANT_TERMINATED: "tenant.terminated"
 } as const;
 
 export type PlatformEventName = (typeof PLATFORM_EVENTS)[keyof typeof PLATFORM_EVENTS];

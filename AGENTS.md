@@ -139,6 +139,9 @@ style.** Consistency matters more than design preference.
 
 ## 5. Code conventions
 
+- **Runtime is Node with native TypeScript type stripping.** Relative imports carry real
+  extensions (`./thing.ts`). Do not use `enum`, `namespace`, or parameter properties — type
+  stripping does not support them. See `docs/adr/0006`.
 - **TypeScript strict.** No new `any`. No `as` casts used to silence an error.
 - **Validate at system boundaries.** Every input from outside (HTTP body, webhook, marketplace
   response) is validated with zod before use. Types from `contracts` are the result of
@@ -153,6 +156,13 @@ style.** Consistency matters more than design preference.
   No `console.log`.
 - **Comments only for what cannot be inferred from the code** — hidden invariants, workarounds,
   ordering that matters. Do not comment on the diff or narrate change history.
+- **A test name states the invariant, not the call.** `a seller may not read another tenant by
+  guessing its id` describes a rule that must hold; `listTenants returns 403` describes an
+  implementation and passes for the wrong reasons.
+- **Do not weaken an assertion to make a test pass.** If a test fails, either the code is wrong or
+  the test encodes a wrong expectation. Decide which, and fix that one. Changing
+  `assert.equal(x, 2)` to `assert.equal(x, 1)` because the code produces 1 is the failure mode
+  §8's "never weaken an existing test" exists to prevent.
 
 ---
 
@@ -166,7 +176,12 @@ style.** Consistency matters more than design preference.
 - **Do not mock our own code.** Mock only external boundaries (marketplace HTTP, KMS) and explain
   why.
 - **Tenant isolation tests are mandatory** for every new endpoint accepting a `tenant_id`: prove
-  tenant A cannot read tenant B's data.
+  tenant A cannot read tenant B's data. The unit suites are not enough for this: `search_path`
+  pinning can only be proven against a real database, so isolation tests for data access belong in
+  `apps/services/control-plane/test/integration/` and run under `pnpm test:integration`.
+- **A test may be skipped, never weakened.** The integration suite skips itself when
+  `TEST_DATABASE_URL` is unset so that `pnpm test` works without a database. Keep that property: an
+  isolation test that silently stops asserting is the failure mode this rule exists to prevent.
 
 ---
 
@@ -202,6 +217,12 @@ green, because a checker that silently stops checking is worse than no checker.
    format in `docs/adr/0000-template.md`.
 6. If you find `AGENTS.md` is no longer accurate, update it in the same PR as the change that
    made it inaccurate.
+7. When you tick a milestone exit criterion in `docs/PLAN.md`, record next to it the command you
+   ran and what it printed. A criterion is evidence, not intent: "tenant isolation passes" means a
+   named test file passing against a real database, and the plan entry says which one.
+8. If part of an exit criterion is unmet, leave it unticked and write the gap under the milestone's
+   "Known limits". An unticked box with a stated reason is worth more than a ticked one nobody can
+   reproduce.
 
 ### Stop and ask a human before
 

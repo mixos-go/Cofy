@@ -12,6 +12,27 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # The isolation guarantee in ADR 0001 cannot be verified without a real Postgres, so one runs
+    # here and the integration suite asserts on it directly.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+          POSTGRES_DB: platform_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://platform:platform@localhost:5432/platform_test
+
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +42,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # ADR 0006: unflagged TypeScript type stripping requires Node >= 22.18.
+          node-version: 22.18.0
           cache: pnpm
 
       - name: Install dependencies
@@ -40,3 +62,6 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      - name: Integration tests
+        run: pnpm test:integration
