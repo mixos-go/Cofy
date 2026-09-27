@@ -18,13 +18,13 @@ This file is the **single source of truth for what we are building next**.
 |---|---|---|---|
 | M0 | Repo foundation & guardrails | Done (CI enforcement pending first PR) | — |
 | M1 | Tenant provisioning (control plane) | Done | M0 |
-| M2 | Channel connector: TikTok Shop + Tokopedia | Not started | M1 |
+| M2 | Channel connector: TikTok Shop + Tokopedia | In progress | M1 |
 | M3 | Order import & stock sync (one channel, end-to-end) | Not started | M2 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
-| M8 | Multi-channel expansion (Shopee, Lazada) | Not started | M4 |
+| M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
 ---
 
@@ -142,12 +142,70 @@ are mechanical.
 
 **Exit criteria**
 
-- [ ] A seller can complete OAuth and we persist working credentials.
-- [ ] We can fetch orders and push stock against a sandbox/staging account.
-- [ ] Contract tests pass offline and cover: token expiry, rate-limit response, partial failure,
-      and a malformed response.
-- [ ] `capabilities()` accurately reflects the two-API split (verified against real responses).
-- [ ] No marketplace-specific type leaks outside the connector package.
+- [x] A seller can complete OAuth and we persist working credentials. *(Verified live 2026-09-28
+      against Development Shop `7494816329028044768`: a real authorization code was exchanged and
+      the connector returned both an access token and a `shop_cipher`. Reproduce with
+      `scripts/verify-orders.mjs` and a fresh `TIKTOK_AUTH_CODE`. `scripts/probe:auth` checks the app
+      credentials alone.)*
+- [x] We can fetch orders against a sandbox account. *(Verified live 2026-09-28: the two-API read
+      pulled a real order — search returned ids, detail filled 2 line items, `payment.sub_total`
+      equalled the summed line totals and `total_amount` matched `grandTotal`. Reproduce with
+      `scripts/verify-orders.mjs`.)*
+- [ ] Stock push remains **blocked**: TikTok's `updateInventory` addresses items by a platform
+      `product_id`/`sku_id` that we only obtain once listing import exists, so
+      `capabilities().supportsStockPush` is `false` rather than faked. This is deferred to M3, not a
+      connector gap.
+- [x] Contract tests pass offline and cover: token expiry, rate-limit response, partial failure,
+      and a malformed response. *(30 tests, no network; `test/connector.test.ts`)*
+- [x] `capabilities()` accurately reflects the two-API split (verified against real responses).
+      *(`splitsOrderHistory: true`; the search endpoint genuinely returns id-only orders that the
+      detail endpoint fills)*
+- [x] No marketplace-specific type leaks outside the connector package. *(`src/index.ts` exports
+      only the connector and its config; `pnpm boundaries` passes)*
+
+**Known limits carried forward (recorded, not hidden)**
+
+- **A line item is one unit.** Live order inspection (2026-09-28) showed TikTok sends one line item
+  per unit and no quantity field: two identical line items summed to twice the unit price. The
+  connector reads quantity via `lineQuantity()` (1 per line) rather than `0`, which would have made
+  every imported order look empty. A chargeable `quantity` field is still honoured if it ever appears.
+- **Twelve-digit floor values are integer minor units, not rupiah.** The sandbox uses inflated
+  prices (e.g. `200000` for a `20000000`-minor subtotal) purely for readability, so do not "fix"
+  scale against sandbox numbers; the conversion is validated by `payment.sub_total` matching the
+  summed line totals.
+- **Shop sandbox is the production host, not a separate sandbox host.** TikTok Shop's sandbox is a
+  Development Shop authorized against the same app on `open-api.tiktokglobalshop.com`. The connector
+  therefore needs no host switch; do not add one.
+- **The app enforces an IP allowlist.** A real authorization attempt reached the token endpoint and
+  was refused with `Access denied. Your IP address is not in the IP allow list configured for this
+  app`. Our egress IP must be registered in Partner Center before any token exchange can succeed.
+  *(Resolved 2026-09-28: the egress IP was allowlisted and `probe:auth` now returns normal token
+  errors instead of the allowlist refusal.)* This is an operational constraint, not a code gap:
+  production egress (the integration plane) must be allowlisted, and a fixed egress IP is required
+  for the integration plane. Do not work around it with a proxy. The refusal is classified as a
+  non-retryable `FORBIDDEN` so the governor does not retry it.
+- **TikTok webhook signature is unimplemented.** The scheme is not in the official OAS, the
+  vendored SDK, or TikTok's reference tables. Rather than ship a guessed verifier that could fail
+  open, `supportsWebhooks` is `false` and `webhookHandlers()` returns `{}`. Enabling it requires
+  the documented algorithm, a `webhook.ts` with tests, and flipping the capability in one change.
+- **Per-line order quantity is unreported.** The published TikTok Shop OAS has no quantity field
+  on order line items. Lines map with `quantity: 0` (a sentinel meaning "not reported", never
+  "zero items") until a live sandbox order confirms the real field name.
+- **The vendored TikTok SDK types are stale.** `GetOrderDetailResponse` lacks `orders[].id`,
+  `create_time` and `line_items`, and the detail path has moved from `202309` to `202507`. A
+  reviewed local schema (`src/order-schema.ts`) mirrors the official OAS instead of editing
+  generated code (ADR 0007). Re-vendor from upstream when convenient; do not patch `dist/`.
+- **`ShopeeConnector` landed early**, ahead of M8. That is a deliberate scope deviation and is
+  flagged here rather than left implicit; it is not evidence M8 is underway.
+- **The authorize URL's redirect parameter name is taken from the vendored SDK.** TikTok's public
+  Seller Center flow uses `redirect_uri`; the SDK builds `path` (plus `timestamp`, `shop_type`).
+  The host accepts our URL (verified live 2026-09-27: HTTP 200, real authorize page), but a full
+  seller approval has not been run. If a live approval rejects `path`, `beginAuthorization` is a
+  one-line change plus its test.
+- **Token-endpoint error codes are classified from live observation, not documentation.**
+  `36004004` (invalid auth code) and `36004005` (unknown refresh token) map to a non-retryable
+  `CREDENTIAL_EXPIRED` so the seller is asked to reconnect instead of the governor retrying
+  forever. The published code tables do not list them; treat the set as extendable.
 
 **Non-goals**
 

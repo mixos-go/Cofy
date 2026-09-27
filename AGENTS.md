@@ -231,3 +231,49 @@ green, because a checker that silently stops checking is worse than no checker.
 - Changing the event format in `contracts` (a breaking change across apps).
 - Anything touching secret handling or seller credentials.
 - Disabling a test or a CI checker.
+
+---
+
+## 9. Lessons from real connectors
+
+Hard-won specifics from building `connectors/shopee` and `connectors/tiktok-tokopedia`. Add here
+when a channel teaches us something the contract cannot express.
+
+- **Generated marketplace SDKs lie about response shapes.** The TikTok SDK's typed
+  `GetOrderDetailResponse` omits `orders[].id`, `create_time` and `line_items`, and points at a
+  stale endpoint version. Verify a generated type against the official spec before trusting it,
+  and check the path the client actually requests in a test. Do not patch `dist/` (ADR 0007);
+  describe the real shape in a reviewed local schema instead.
+- **Money conventions differ per channel and must never be shared.** Shopee sends integer minor
+  units; TikTok sends decimal strings (`"100.00"`). Parse decimal strings with string arithmetic,
+  not `Number(x) * 100`. One money reader per connector. See `connectors/tiktok-tokopedia/src/money.ts`.
+- **Marketplace "success" can be an HTTP 200 with an error in the body.** Always pass responses
+  through a success assertion; an unmapped non-zero code reads as an empty successful page. The
+  same applies to a transport 429 with no body code — map it to `RateLimitedError` so the governor
+  sees it (AGENTS.md §4).
+- **A cursor must be able to say "caught up".** `Cursor.value = null` ends a reconciliation walk;
+  a page token keeps it resumable. Test both transitions, or reconciliation will either loop
+  forever or stop early.
+- **Record undocumented fields as gaps, not guesses.** When the spec omits something (TikTok's
+  per-line quantity, its webhook signature), declare the capability `false` or use a sentinel and
+  write the gap under the milestone's "Known limits" in `docs/PLAN.md`. A guess that looks like a
+  working feature is worse than a visible gap.
+- **Vendored SDKs need a CommonJS boundary.** A CJS `dist` only resolves named exports if its
+  `package.json` declares `"type": "commonjs"`, and the build directory must be un-ignored (see
+  `.gitignore`). Route every vendored import through one `src/vendor/<sdk>.ts` bridge.
+- **Share connector tooling, not connector code.** The vendor-integrity and checksum scripts live
+  in `tooling/vendor/`, not inside one connector, so the second connector reuses them instead of
+  copying them.
+- **Read quantity from a live order before trusting a documented field.** TikTok Shop sends one line
+  item per unit and no quantity field; reading quantity as `0` (or inventing it from a spec that
+  omits it) silently makes every order look empty. A single sandbox order settled it: two identical
+  line items summed to twice the unit price. Verify a channel's undocumented/absent fields with real
+  data, and make the mapping's default explicit and tested.
+- **Do not assume a channel has a separate sandbox host.** TikTok Shop's sandbox is a Development
+  Shop authorized against the same app on the production base URL, so the connector needs no switch.
+  Confirm this before building one.
+- **Keep a live verification script per connector, and prove it reaches the API.** A script that runs
+  the connector's own path (`scripts/verify-orders.mjs`) turns "probably works" into evidence. Run it
+  once with placeholder credentials: if the gateway answers an app_key/credential error rather than a
+  transport or signature error, the wiring, signing and host are proven before real credentials
+  exist. The script must read secrets from the environment, never write them, and mask them in output.

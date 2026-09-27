@@ -1,0 +1,25 @@
+{
+  "name": "@platform/connector-shopee",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shopee Open Platform connector. Implements ChannelConnector; owns all Shopee-specific shapes.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "vendor:checksums": "node ../../tooling/vendor/generate-vendor-checksums.mjs",
+    "vendor:check": "node ../../tooling/vendor/check-vendor-integrity.mjs"
+  },
+  "dependencies": {
+    "@platform/channel-sdk": "workspace:*",
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

@@ -12,8 +12,9 @@
     "test": "pnpm -r --if-present test",
     "test:integration": "pnpm -r --if-present test:integration",
     "boundaries": "pnpm --filter @platform/boundaries check",
-    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries",
-    "check:all": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries && pnpm test:integration"
+    "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries && pnpm vendor:check",
+    "check:all": "pnpm typecheck && pnpm lint && pnpm test && pnpm boundaries && pnpm vendor:check && pnpm test:integration",
+    "vendor:check": "node tooling/vendor/check-vendor-integrity.mjs connectors/shopee/vendor/shopee-sdk && node tooling/vendor/check-vendor-integrity.mjs connectors/tiktok-tokopedia/vendor/tiktok-shop-sdk"
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",

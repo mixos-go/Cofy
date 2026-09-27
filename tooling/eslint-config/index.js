@@ -32,6 +32,11 @@ export default tseslint.config(
     }
   },
   {
+    // Standalone CLI tools: their console output is the user interface, not stray logging.
+    files: ["tooling/vendor/**/*.mjs", "connectors/*/scripts/**/*.mjs"],
+    rules: { "no-console": "off" }
+  },
+  {
     ignores: ["**/dist/**", "**/node_modules/**", "**/.medusa/**"]
   }
 );

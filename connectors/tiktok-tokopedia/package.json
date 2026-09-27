@@ -1,0 +1,28 @@
+{
+  "name": "@platform/connector-tiktok-tokopedia",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "TikTok Shop + Tokopedia connector. Implements ChannelConnector; owns all TikTok-specific shapes.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "vendor:checksums": "node ../../tooling/vendor/generate-vendor-checksums.mjs",
+    "vendor:check": "node ../../tooling/vendor/check-vendor-integrity.mjs",
+    "verify:orders": "node scripts/verify-orders.mjs",
+    "probe:auth": "node scripts/live-auth-probe.mjs",
+    "authorize:url": "node scripts/print-authorize-url.mjs"
+  },
+  "dependencies": {
+    "@platform/channel-sdk": "workspace:*",
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

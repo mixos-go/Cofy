@@ -1,0 +1,16 @@
+{
+  "vendor": "mixos-go",
+  "channel": "tiktok_tokopedia",
+  "upstreamRepo": "https://github.com/mixos-go/tiktok-shop",
+  "upstreamCommit": "4ccabda1dc076898724a4a250da43b6c73cf33ed",
+  "upstreamPackage": "@mixos-go/tiktok-shop-sdk",
+  "upstreamVersion": "1.2.0",
+  "vendoredArtifact": "dist",
+  "license": "MIT",
+  "licenseFilePresent": false,
+  "licenseNote": "MIT is declared in the upstream sdk/package.json. The upstream repo contains no LICENSE file at this commit, so none could be copied. Recorded here rather than silently assumed to be absent.",
+  "generatedFrom": "Official TikTok Shop Open Platform reference docs (363 APIs / 25 categories). Covers TikTok Shop only; order and bill history for Tokopedia stays on the Tokopedia Open Platform and is not in this SDK (docs/adr/0003).",
+  "officialSpecSource": "The TikTok Shop OAS published as @tts-open-toolkit/cli on npmjs.org is the authoritative machine-readable spec (405 paths, MIT). The vendored generated client is current against it as of this commit and is used because it provides types and signing; the OAS is used for drift checking, not runtime.",
+  "regenerate": "Upstream has no release cadence we can rely on. To update: clone the upstream repo at the desired commit, run `npm install && npm run build` in `sdk/`, replace `dist/`, then run `pnpm --filter @platform/connector-tiktok-tokopedia vendor:checksums`.",
+  "doNotEdit": "Vendored files are byte-identical to upstream and checked by CHECKSUMS.sha256. Put all adaptation in the connector source, never here. See docs/adr/0007."
+}

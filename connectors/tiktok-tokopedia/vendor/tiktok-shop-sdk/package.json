@@ -1,0 +1,10 @@
+{
+  "name": "@vendor/tiktok-shop-sdk",
+  "version": "1.2.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "description": "Vendored, unmodified build of @mixos-go/tiktok-shop-sdk. Do not edit. See VENDOR.md.",
+  "license": "MIT"
+}

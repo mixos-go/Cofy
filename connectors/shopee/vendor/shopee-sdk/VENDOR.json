@@ -1,0 +1,15 @@
+{
+  "vendor": "mixos-go",
+  "channel": "shopee",
+  "upstreamRepo": "https://github.com/mixos-go/shopee",
+  "upstreamCommit": "e2ff5ad1d662c2a158472ea0a77b14986653b2ec",
+  "upstreamPackage": "@mixos-go/shopee-sdk",
+  "upstreamVersion": "1.1.1",
+  "vendoredArtifact": "dist",
+  "license": "MIT",
+  "licenseFilePresent": false,
+  "licenseNote": "MIT is declared in the upstream sdk/package.json. The upstream repo contains no LICENSE file at this commit, so none could be copied. Recorded here rather than silently assumed to be absent.",
+  "generatedFrom": "Official Shopee Open Platform reference docs (444 APIs / 29 categories)",
+  "regenerate": "Upstream has no release cadence we can rely on. To update: clone the upstream repo at the desired commit, run `npm install && npm run build` in `sdk/`, replace `dist/`, then run `pnpm --filter @platform/connector-shopee vendor:checksums`.",
+  "doNotEdit": "Vendored files are byte-identical to upstream and checked by CHECKSUMS.sha256. Put all adaptation in the connector source, never here. See docs/adr/0007."
+}

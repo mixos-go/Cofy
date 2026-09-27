@@ -6,3 +6,15 @@ build/
 .turbo/
 *.log
 .DS_Store
+
+# Vendored marketplace SDK builds are committed on purpose. The `dist/` rule above would
+# otherwise hide them. See docs/adr/0007.
+!connectors/*/vendor/*/dist/
+!connectors/*/vendor/*/dist/**
+
+# Credential files must never be committed, whatever an operator names them.
+*.key
+*.pem
+.env
+.env.*
+!.env.example
