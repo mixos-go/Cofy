@@ -28,6 +28,7 @@ import { createControlPlaneServer } from "./http.ts";
 import { TenantClient } from "@platform/tenant-client";
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import type { SyncStateStore } from "@platform/sync-state";
+import { PostgresSyncStateStore } from "./sync-state-store.ts";
 import { InMemoryMedusaTargetStore } from "./medusa-target.ts";
 import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
 
@@ -122,10 +123,14 @@ async function main(): Promise<void> {
     ttlSeconds: Number(process.env.AUTH_SESSION_TTL_SECONDS ?? 43200)
   });
 
-  // Platform-owned channel sync state (ADR 0010). In-memory here so the service starts with no
-  // infrastructure; the Postgres-backed store lands behind this same interface when the registry
-  // database is wired in. The service tokens are the worker's credential to this surface.
-  const syncState: SyncStateStore = new InMemorySyncStateStore();
+  // Platform-owned channel sync state (ADR 0010). The Postgres store is the real one and is selected
+  // whenever the registry database is configured; the in-memory store keeps the service startable
+  // with no infrastructure, but it dies with the process, so it is not a deployment option. The
+  // service tokens are the worker's credential to this surface.
+  const syncState: SyncStateStore =
+    databaseUrl !== undefined && databaseUrl !== ""
+      ? new PostgresSyncStateStore(databaseUrl)
+      : new InMemorySyncStateStore();
   const serviceTokens = (process.env.CONTROL_PLANE_SERVICE_TOKENS ?? "")
     .split(",")
     .map((token) => token.trim())

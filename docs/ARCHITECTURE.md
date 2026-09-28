@@ -127,6 +127,14 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 identifiers and cursors, never product, order, or stock data — that stays in the tenant data plane.
 Its interface is exposed by the control plane and reached by the worker over HTTP (ADR 0010).
 
+The interface has two implementations: `InMemorySyncStateStore` (tests and local runs) and
+`PostgresSyncStateStore` (`apps/services/control-plane/src/sync-state-store.ts`, selected when
+`DATABASE_URL` is set). The Postgres store lives in the control plane rather than in the package
+because a SQL driver is permitted only there and in `tenant-client` (AGENTS.md §2.3); its tables sit
+in the `platform_ops` schema beside the tenant deletion schedule. Both stores are held to one shared
+conformance suite (`packages/sync-state/testing`), so a rule that holds in tests also holds on the
+database.
+
 ## 3. Key flows
 
 ### 3.1 Seller connects a shop

@@ -25,7 +25,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | Blocked on ADR 0013 approval (workflow engine choice) | M3 |
+| M4 | Reconciliation & drift repair | In progress — durable sync-state store done; workflow queue next | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -456,10 +456,15 @@ boundary", not "shipped".
   `429` and records the failure, and nothing re-runs it until M4 teaches the workflow engine to
   reschedule on `CHANNEL_RATE_LIMITED`. The budget is enforced (no over-budget call leaves the
   plane); the work is not yet requeued by itself.
-- Sync state is in-memory in the running control plane (`InMemorySyncStateStore`), matching the
-  service's existing default of "starts with no infrastructure". Every invariant above is enforced
-  by that store's real logic, but a restart drops it; the Postgres-backed store lands behind the
-  same interface (ADR 0010) before any durable deployment.
+- Sync state is durable when `DATABASE_URL` is configured: the control plane now selects
+  `PostgresSyncStateStore` (ADR 0010), and the in-memory store remains only as the
+  no-infrastructure local default. Both implementations are held to one shared conformance suite
+  (`packages/sync-state/testing/store-conformance.ts`): 24 tests over the in-memory store, and the
+  same 24 plus a table-level uniqueness check over a real Postgres
+  (`apps/services/control-plane/test/integration/sync-state-store.test.ts`). Durable sync state is
+  the prerequisite for M4's "kill the worker mid-reconciliation; restart resumes without
+  duplicating effects" — an engine that survives a restart over state that does not would be a
+  false comfort.
 - An idempotency claim is a lease with a fixed TTL (default 5 minutes). A crashed attempt is
   therefore reclaimable by a later retry after the lease passes; reconciliation is no longer the
   only repair path. The TTL is a guess, not a measurement: too short and a slow-but-alive call is
@@ -484,22 +489,25 @@ boundary", not "shipped".
 
 **Goal.** The system repairs itself. A dropped webhook or a crashed worker becomes a non-event.
 
-**Status.** Blocked on one human decision before implementation: the workflow engine choice. M3
-built the workflows as plain functions over ports and deliberately did not pick an engine
-(AGENTS.md §2.5). M4's exit criteria ("kill the worker mid-reconciliation; restart resumes without
-duplicating effects") cannot be met without one. **ADR 0013** proposes keeping the workflows
-engine-agnostic behind a `WorkflowQueue` port with a Redis-backed (BullMQ) adapter, with the
-governor as the only component that decides delay. It is **Proposed, not accepted** — implementation
-does not start until it is approved.
+**Status.** In progress. ADR 0013 is accepted (the workflows stay engine-agnostic behind a
+`WorkflowQueue` port; the governor is the only component that decides delay). The first deliverable —
+a durable sync-state store — is done and verified against real Postgres. Next is the `WorkflowQueue`
+port and adapters, then rescheduling a `CHANNEL_RATE_LIMITED` call through the queue (which also
+closes M3's open item).
 
 **Deliverables**
 
-- Durable sync-state store behind the existing `SyncStateStore` interface (Postgres), so an engine
-  that survives a restart has idempotency records that survive it too.
-- `WorkflowQueue` port + adapters (ADR 0013), wiring the M3 workflow functions as units.
-- Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After` — this
+- **[x] Durable sync-state store behind the existing `SyncStateStore` interface (Postgres)**, so an
+  engine that survives a restart has idempotency records that survive it too. *(Done and verified
+  against a real Postgres 16: `PostgresSyncStateStore` in `apps/services/control-plane`, selected by
+  `main.ts` when `DATABASE_URL` is set. Both stores run one shared conformance suite
+  (`packages/sync-state/testing/store-conformance.ts`); the Postgres run adds a table-level
+  uniqueness check. Evidence: `apps/services/control-plane/test/integration/sync-state-store.test.ts`
+  — 26 pass, including "only one of two concurrent claims for the same key wins".)*
+- [ ] `WorkflowQueue` port + adapters (ADR 0013), wiring the M3 workflow functions as units.
+- [ ] Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After` — this
   also closes M3's open item (a throttled call is recorded failed today and never re-run).
-- Cursor-based pull for orders and stock snapshots, per tenant per channel.
+- [ ] Cursor-based pull for orders and stock snapshots, per tenant per channel.
 - Drift detection: compare pulled state against local state, classify drift type.
 - Repair via the same idempotent workflows used by real-time paths (no second code path).
 - Cursor advance only after successful commit; safe re-run.

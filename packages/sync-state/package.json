@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Platform-owned channel sync state: order refs, idempotency, cursors, SKU maps (ADR 0010).",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./testing": "./testing/store-conformance.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

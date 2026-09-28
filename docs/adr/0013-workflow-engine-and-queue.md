@@ -1,6 +1,6 @@
 # ADR 0013 — Workflow engine: a port with a Redis-backed adapter, not a framework in the workflows
 
-- **Status:** Proposed
+- **Status:** Accepted (approved 2026-09-26)
 - **Date:** 2026-09-26
 - **Deciders:** Platform team
 

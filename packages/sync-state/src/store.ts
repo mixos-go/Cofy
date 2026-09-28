@@ -135,7 +135,14 @@ function cursorKey(tenantId: TenantId, channel: ChannelCode, entity: SyncEntity)
  */
 export const DEFAULT_IDEMPOTENCY_LEASE_MS = 5 * 60 * 1000;
 
-function leaseDeadline(ttlMs: number | undefined, now: Instant): Instant {
+/**
+ * The instant a claim taken at `now` stops being exclusive.
+ *
+ * Exported so the Postgres store computes the same deadline from the same rule instead of keeping a
+ * second copy of it: the two implementations must not drift on a value the safety of a retry depends
+ * on. A non-positive TTL is rejected rather than stored as an already-expired lease.
+ */
+export function leaseDeadline(ttlMs: number | undefined, now: Instant): Instant {
   const ttl = ttlMs ?? DEFAULT_IDEMPOTENCY_LEASE_MS;
   if (!Number.isFinite(ttl) || ttl <= 0) {
     throw new RangeError("Idempotency lease TTL must be a positive number of milliseconds.");

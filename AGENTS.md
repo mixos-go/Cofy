@@ -329,6 +329,14 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   the stolen partial result so a replay never returns a value no attempt completed. Completing an
   already-terminal claim with the same outcome must be a no-op, not a conflict — a stolen lease can
   leave two attempts finishing the same idempotent write.
+- **Two implementations of one interface drift unless one suite tests both.** The in-memory store
+  and the Postgres store held the same promises on paper and would not have held them in practice:
+  an in-memory `Map` cannot enforce a uniqueness constraint the way a primary key does, and the
+  compare-and-swap in `claimIdempotency` has to be a `select ... for update` inside one transaction
+  rather than two statements. Run the *same* conformance suite against both
+  (`packages/sync-state/testing`), or "the in-memory one mirrors the real one" is an assumption, and
+  the difference surfaces as a production-only bug. The suite lives on a `./testing` subpath so
+  `node:test` never loads in a running service.
 
 ---
 
