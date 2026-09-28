@@ -27,8 +27,10 @@ This file is the **single source of truth for what we are building next**.
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
-E0 is a prerequisite track (see below), not a milestone: a fixed egress IP and the
-integration-plane skeleton that every later milestone writes into.
+E0 is a prerequisite track (see below), not a milestone: the production egress decision and the
+integration-plane skeleton that every later milestone writes into. **It gates a production
+deployment, not development or boundary-level M3 work** — see the note on the OpenHands Cloud
+development environment under E0.
 
 ---
 
@@ -104,10 +106,23 @@ codebase, before any business logic exists.
 - [x] Migration fan-out reports per-tenant success/failure and can retry only the failures.
       *(verified: `test/migration-fanout.test.ts`, including the case where one tenant fails and the
       remaining tenants still run)*
+- [x] Vanilla Medusa's own migrations put their core tables in the tenant schema, and a second
+      tenant migrates in the same database. *(verified against the real CLI, Medusa 2.21.1:
+      `test/integration/medusa-tenant-migrations.test.ts` runs `medusa db:migrate` twice in one
+      database and asserts `public` holds 0 tables and each tenant schema holds the full set. This
+      caught two defects fixed in ADR 0011: core tables landing in `public` without
+      `databaseDriverOptions.searchPath`, and the second tenant failing on a database-global
+      `pg_type` enum guard)*
 - [x] Tenant isolation test suite passes: tenant A cannot read tenant B data through any endpoint.
       *(verified against a real Postgres: `test/integration/tenant-isolation.test.ts` proves
       unqualified table names resolve per schema and `search_path` stays pinned across pooled
       connections. HTTP-level scope checks are covered by `test/http.test.ts`)*
+- [x] A tenant schema can be provisioned against a Postgres that requires TLS. *(verified against a
+      local Postgres 17 with TLS required and `pg_hba` set to `hostssl` only: the real CLI migrates
+      under both `sslmode=no-verify` and `sslmode=require&sslrootcert=...` once `sslmode` is
+      translated into the driver's `connection.ssl`. Medusa's default is unencrypted and ignores the
+      URL's `sslmode`, so the bare-URL case fails — the translation is what makes a managed instance
+      work. See ADR 0011)*
 - [x] Terminating a tenant revokes credentials and schedules data deletion. *(verified:
       `test/tenants.test.ts` asserts credentials are revoked before the state change, that the data
       is scheduled rather than dropped, and that a failure after revocation leaves no live
@@ -121,6 +136,21 @@ codebase, before any business logic exists.
   that once the store is Postgres-backed.
 - Only one tenant's provisioning runs at a time per process. Concurrency across processes is not
   yet coordinated.
+- **Medusa migrations are proven against a real CLI only up to two tenants in one database.**
+  `test/integration/medusa-tenant-migrations.test.ts` proves core tables land in the tenant schema
+  and that a second tenant migrates. The `pg_type` guard that broke tenant #2 is database-global,
+  so a third tenant exercises the same path; a fleet-wide fan-out is still untested.
+- **The guarded-enum list is version-pinned to `@medusajs/order` 2.21.1.** `MEDUSA_GUARDED_ENUMS`
+  in `tenant-schema.ts` duplicates type definitions that live in Medusa's migrations and can drift
+  on upgrade. The integration test catches a regression, but nothing detects a *new* guarded enum
+  until a second tenant is provisioned on the new version.
+- **Managed Postgres TLS is supported and locally verified.** `sslmode` in `DATABASE_URL` is
+  translated into Medusa's driver-level `connection.ssl`; without that, Medusa's own default is
+  unencrypted and a TLS-required server refuses the migration. Verified by running the real CLI
+  against a local Postgres 17 with TLS required and `pg_hba` set to `hostssl` only, using both
+  `sslmode=no-verify` and `sslmode=require&sslrootcert=...`. What remains unverified is a *specific*
+  provider's certificate chain and any option rewriting it does; confirm against the chosen instance
+  before onboarding tenants on it.
 
 **Non-goals**
 
@@ -180,14 +210,14 @@ are mechanical.
 - **Shop sandbox is the production host, not a separate sandbox host.** TikTok Shop's sandbox is a
   Development Shop authorized against the same app on `open-api.tiktokglobalshop.com`. The connector
   therefore needs no host switch; do not add one.
-- **The app enforces an IP allowlist.** A real authorization attempt reached the token endpoint and
-  was refused with `Access denied. Your IP address is not in the IP allow list configured for this
-  app`. Our egress IP must be registered in Partner Center before any token exchange can succeed.
-  *(Resolved 2026-09-28: the egress IP was allowlisted and `probe:auth` now returns normal token
-  errors instead of the allowlist refusal.)* This is an operational constraint, not a code gap:
-  production egress (the integration plane) must be allowlisted, and a fixed egress IP is required
-  for the integration plane. Do not work around it with a proxy. The refusal is classified as a
-  non-retryable `FORBIDDEN` so the governor does not retry it.
+- **The app enforces an IP allowlist (a production-egress constraint).** A real authorization attempt
+  from OpenHands Cloud reached the token endpoint and was refused with `Access denied. Your IP
+  address is not in the IP allow list configured for this app`. *(Resolved 2026-09-28 for the
+  sandbox by allowlisting the OpenHands Cloud egress IP; `probe:auth` then returned normal token
+  errors instead of the refusal.)* A self-hosted server is not blocked — an unregistered IP is
+  simply not on the list. What this does require is that the **production** integration plane's
+  egress is a stable, registrable IP; do not work around it with a proxy. The refusal is classified
+  as a non-retryable `FORBIDDEN` so the governor does not retry it.
 - **TikTok webhook signature is unimplemented.** The scheme is not in the official OAS, the
   vendored SDK, or TikTok's reference tables. Rather than ship a guessed verifier that could fail
   open, `supportsWebhooks` is `false` and `webhookHandlers()` returns `{}`. Enabling it requires
@@ -221,8 +251,18 @@ are mechanical.
 ## E0 — Integration plane prerequisites (prerequisite track, not a milestone)
 
 **Why this exists.** M2 proved the connector against a live shop, and that surfaced two facts that
-must be settled before any marketplace write can run in production: the app enforces an **IP
+must be settled before any marketplace write can run **in production**: the app enforces an **IP
 allowlist**, and the integration plane that would make calls **does not exist yet**.
+
+**The allowlist is a production-egress concern, not a development blocker.** Development runs on
+OpenHands Cloud, whose egress IP is not registered in Partner Center; that is what produced the
+refusal in M2's records. A self-hosted or company server is **not** blocked — the allowlist is a
+constraint on the IP the marketplace sees, and an unregistered server simply adds its own IP. So
+the "our egress is refused" symptom is an artifact of *where we currently run*, not a defect in the
+integration plane, and it must not be read as "M3 cannot proceed". What genuinely needs a human
+call is only the **production** egress strategy (a stable IP that can be registered, and whether it
+is shared or per-tenant), because that shapes the governor's budget. Nothing in M3's code or its
+boundary-level tests depends on it.
 
 **Deliverables**
 
@@ -283,18 +323,25 @@ and stock propagates back without overselling.
 
 - Rate-limit governor: **done** — `packages/rate-governor`, 12 tests with a fake clock (shared
   app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown).
-- Connector listing read (required before stock push): **designed, awaiting approval** — ADR 0009.
-  Connectors and the `ChannelConnector` interface implement it; the interface change is still
-  frozen-pending.
-- Sync state location and commerce write path: **designed, awaiting approval** — ADR 0010.
+- Connector listing read (required before stock push): **accepted** — ADR 0009 (approved
+  2026-09-26). Connectors and the `ChannelConnector` interface implement it.
+- Sync state location and commerce write path: **accepted** — ADR 0010 (approved 2026-09-26).
 - `packages/sync-state` (ADR 0010 data shape): **done** — external-order refs, payload-keyed
   idempotency records, SKU→channel maps, cursors; 16 tests. Control plane exposes it over HTTP
   behind a service token (7 route tests).
 - Order import, listing import, stock push workflows: **done against the ADR 0010 design** —
   `apps/services/worker`, 15 tests. Each is a function over ports, so it runs unchanged under the
-  M4 engine. None of it is enabled in a running process until the ADRs are approved.
-- `data-plane/modules/channel-order-link`: not started — blocked on ADR 0010 approval (tenant data
-  access is an `AGENTS.md` §8 stop-and-ask). The worker reaches it over the tenant's Admin API.
+  M4 engine. Not yet wired into a running process; that is the remaining M3 work below.
+- `data-plane/modules/channel-order-link`: **verified end-to-end against vanilla Medusa** — module,
+  model, service, migration and the module link in `medusa-config/src/links/` all exist, and the
+  real-CLI integration test proves the module table *and* the link table (`order_order_channelorderlink_...`,
+  i.e. Medusa discovered the link by convention) are created in the tenant schema, that the
+  partial unique index rejects a second link for the same `(tenant, channel, external_order_id)`,
+  and that dismissing a link frees the key for re-import. The worker still reaches it over the
+  tenant's Admin API (ADR 0010).
+- Tenant Admin API surface the worker calls (`/admin/orders`, `/admin/orders/:id/release`,
+  `/admin/variants`, `/admin/channel-order-links`): **not built** — this is the remaining M3
+  code work before the boundary-proven workflows can run against a live tenant.
 
 **Deliverables**
 
@@ -312,16 +359,23 @@ and stock propagates back without overselling.
 - Rate-limit governor: global budget per app key and per seller.
 - Medusa integration as a **data-plane module**, never a fork: implement `data-plane/modules/
   channel-order-link` and register it via a module link (ADR 0001). No core Medusa table gains a
-  column; the tenant stays on a vanilla image.
+  column; the tenant stays on a vanilla image. *(Done and verified against the real CLI; see
+  Progress above.)*
 - Mapping layer: marketplace stock location ↔ Medusa stock location, per tenant.
+- Tenant-side Admin API routes so the worker's `CommerceClient` calls have an implementation:
+  `/admin/variants` (SKU → variant), `/admin/orders` (create with reservations, idempotency-key
+  honoured), `/admin/orders/:id/release` (compensation), `/admin/channel-order-links` (the
+  external-ref lookup compensation depends on).
 
 **Exit criteria**
 
 Boundary note: the four criteria below are proven at the **port boundary** — the workflows, the sync
 state, and the invariants they hold are real code under test, while the marketplace and the tenant
 Medusa are fakes (AGENTS.md §6 permits this for external boundaries). They are *not yet* proven
-against a live channel and a live Medusa, because that write path (ADR 0010) is unapproved. The
-evidence line names the exact test; treat a checked box as "correct at the boundary", not "shipped".
+against a live channel and a live Medusa. The blocker is **environment and hosting, not an
+approval**: ADR 0010 is accepted, and the allowlist refusal is specific to OpenHands Cloud (a
+self-hosted server is not blocked — see E0). The evidence line names the exact test; treat a checked
+box as "correct at the boundary", not "shipped".
 
 - [ ] A real order placed on the channel appears in the tenant's Medusa with correct line items,
       totals and inventory reservation. *(Boundary evidence: `worker/test/order-import.test.ts` —

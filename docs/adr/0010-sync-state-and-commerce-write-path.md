@@ -1,8 +1,13 @@
 # ADR 0010 — Sync state lives in the control plane; commerce writes go through the tenant's Medusa API
 
-- **Status:** Proposed (needs human approval — it touches tenant data access, a stop-and-ask area)
+- **Status:** Accepted (approved 2026-09-26 — touches tenant data access)
 - **Date:** 2026-09-26
 - **Deciders:** Platform engineering
+
+> Approval note: accepted as-is. The worker now writes through a tenant's Medusa Admin API and the
+> control plane owns sync state; `data-plane/modules/channel-order-link` is unblocked and is the
+> next piece of M3. Persistence behind the sync-state interface and the `in_flight` claim expiry
+> remain follow-ups, recorded as M3 known limits.
 
 ## Context
 

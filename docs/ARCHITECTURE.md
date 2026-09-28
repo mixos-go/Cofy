@@ -199,6 +199,10 @@ Enforcement:
 - `integration-plane` and `worker` have no database credentials for tenant schemas.
 - `packages/tenant-client` resolves `tenant_id -> connection` from the control-plane registry.
 - Every endpoint accepting a `tenant_id` must have a test proving cross-tenant reads fail.
+- Vanilla Medusa's own migrations must land in the tenant schema too, not just our queries. That
+  takes a driver-level `searchPath`, per-tenant creation of three enum types Medusa guards on a
+  database-global catalog check, and translating the URL's `sslmode` into the driver's
+  `connection.ssl` for a TLS-required Postgres. Mechanics and rationale: `docs/adr/0011`.
 
 Full rationale and accepted trade-offs: `docs/adr/0001`.
 

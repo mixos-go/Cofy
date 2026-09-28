@@ -313,3 +313,48 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
 - **Node's strip-only TypeScript rejects parameter properties.** `constructor(private readonly x)`
   throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` under `node --test`. Use an explicit field
   assignment, matching §5.
+
+---
+
+## 11. Lessons from the vanilla Medusa data plane
+
+Hard-won specifics from making Medusa's *own* migrations land in a tenant schema without forking
+it. Same rule as §9/§10. Full rationale: `docs/adr/0011`.
+
+- **`DATABASE_SCHEMA` is read by Medusa but does not pin the schema on the connection that runs
+  DDL.** `loadDatabaseConfig` passes it to the shared connection only, and MikroORM derives its
+  `SET search_path` from `clientUrl`'s `?schema=`, which is absent when Medusa builds a structured
+  connection object. The option that actually reaches every module connection is the knex-level
+  `projectConfig.databaseDriverOptions.searchPath`. Without it, 125 core tables land in `public`
+  while the tenant schema gets only module tables — a silent isolation break, not an error.
+- **A `pg_type` guard without a namespace filter is a database-global check.** Medusa's order
+  migrations create three enum types behind `IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname =
+  ...)`. `pg_type` is shared across schemas, so the first tenant satisfies the guard for every
+  other tenant; the second tenant's `CREATE TYPE` is skipped and its `CREATE TABLE` fails with
+  `type ... does not exist`. The control plane pre-creates those enums per schema. Re-check the
+  list (`MEDUSA_GUARDED_ENUMS`) on every Medusa upgrade: a new or changed guarded enum silently
+  reintroduces the failure for tenant #2 onward, while tenant #1 keeps passing.
+- **Prove data-plane behavior with the real CLI, not with config assertions.** Both defects above
+  are invisible to a unit test that inspects `projectConfig`. The integration test runs
+  `medusa db:migrate` against a dedicated database and asserts `public` has zero tables and the
+  tenant schema has the full set — that is what turns "the config looks right" into evidence.
+- **A config that must run under two runtimes needs one source of truth and a thin adapter.** The
+  Medusa CLI resolves `medusa-config` through a CommonJS `require` and cannot load a `.ts` file,
+  while our tests and services run TypeScript directly. `medusa-config.js` is a three-line ESM shim
+  that imports `medusa-config.ts`; do not put logic in the shim, and do not fork the config into
+  two files.
+- **Medusa's driver ignores `sslmode` in `DATABASE_URL`.** `createPgConnection` always sets
+  `connection.ssl`, defaulting to `false`, so `?sslmode=require` still connects unencrypted and a
+  TLS-required managed Postgres refuses the migration with `no pg_hba.conf entry ... no encryption`.
+  `medusa-config` reads `sslmode` from the URL and sets `databaseDriverOptions.connection.ssl`
+  (`no-verify` → `rejectUnauthorized: false`; `require` → verify, with `ca` from `sslrootcert`).
+  Never use `NODE_TLS_REJECT_UNAUTHORIZED=0`: it disables verification for every outbound TLS
+  connection, marketplaces included. A local Postgres accepts unencrypted connections, so this is
+  invisible in development — test against a `hostssl`-only server before trusting it.
+- **A module is not loaded until a real migration run proves it.** `channel-order-link` and its
+  module link are discovered by convention (`src/links/` of the *project*, not the module), so
+  "the file exists and typechecks" says nothing about whether Medusa wires it. The real-CLI
+  integration test asserts both `channel_order_link` and the link table
+  (`order_order_channelorderlink_...`) exist in the tenant schema; that is the evidence. The same
+  test asserts the partial unique index on `(tenant_id, channel, external_order_id)` rejects a
+  duplicate and frees the key after a soft delete — the uniqueness M3's import idempotency rests on.

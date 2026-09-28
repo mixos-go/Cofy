@@ -1,8 +1,12 @@
 # ADR 0009 — The connector contract gains a listing read, and stock push becomes real
 
-- **Status:** Proposed (needs human approval — it changes a frozen shared interface)
+- **Status:** Accepted (approved 2026-09-26 — extends a frozen shared interface)
 - **Date:** 2026-09-26
 - **Deciders:** Platform engineering
+
+> Approval note: accepted as-is. The `fetchListings` addition and the `ChannelListing` contract are
+> now part of the frozen interface; a channel's `supportsStockPush` flips to `true` only when both
+> `fetchListings` and `pushStock` are implemented and tested against fixtures (see Decision).
 
 ## Context
 

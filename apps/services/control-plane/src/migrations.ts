@@ -87,8 +87,13 @@ export class MedusaCliMigrationRunner implements TenantMigrationRunner {
     const result = await this.#runCommand(command, [...prefixArgs, "db:migrate"], {
       cwd: this.#cwd,
       env: {
-        // The schema is conveyed inside DATABASE_URL, so the CLI needs no extra knowledge.
+        // The schema is conveyed two ways. `options=-c search_path=...` in the URL is the plain
+        // driver path, but it is overridden: knex emits `set search_path to "<schema>"` after
+        // connecting, from `databaseDriverOptions.searchPath` in `medusa-config`, which is itself
+        // built from `DATABASE_SCHEMA`. Both are passed so the URL and the config agree; see
+        // ADR 0011 for why `DATABASE_SCHEMA` alone is not sufficient.
         DATABASE_URL: databaseUrl,
+        DATABASE_SCHEMA: schemaName,
         // Migrations must never prompt: a hanging process looks identical to a slow one.
         MEDUSA_DISABLE_TELEMETRY: "1",
         CI: "true"
