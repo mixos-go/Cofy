@@ -143,6 +143,10 @@ style.** Consistency matters more than design preference.
 
 ## 5. Code conventions
 
+- **Language.** Every artifact in this repository is written in **English**: code, comments,
+  commit messages, ADRs, and docs. Chat, summaries, and feedback to the user are written in
+  **Indonesian**. Never use Chinese (Mandarin) in either — not in prose, not in identifiers, not
+  as an accidental paste.
 - **Runtime is Node with native TypeScript type stripping.** Relative imports carry real
   extensions (`./thing.ts`). Do not use `enum`, `namespace`, or parameter properties — type
   stripping does not support them. See `docs/adr/0006`.
