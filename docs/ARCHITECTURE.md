@@ -66,12 +66,15 @@ Owns everything about *who the tenant is*, not *what they sell*.
 Owns everything about *talking to the outside world*.
 
 - Connectors (via `connectors/*`) implementing `packages/channel-sdk`.
-- Webhook receivers: verify signature, persist raw event, enqueue, return. Nothing else.
+- Webhook receivers: verify signature, persist raw event, enqueue, return. Nothing else. *(Not
+  built: no connector declares `supportsWebhooks` yet, so there is nothing to verify.)*
 - OAuth authorization and callback handling. `state` values are single-use and expiring, and the
   redirect URI is derived from configured public origin, never from a request header.
 - Seller credentials: the callback persists what the connector returns via
   `packages/secrets`' `CredentialStore`; the probe path proves a stored credential still works.
-- Rate-limit governor: global scheduling per app key and per seller.
+- Rate-limit governor: global scheduling per app key and per seller. *(The package exists and is
+  tested, but no caller consults it yet — no live call is actually rate limited; see M3's known
+  limits in `PLAN.md`.)*
 - Credential refresh scheduling.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
@@ -86,7 +89,9 @@ Owns *executing work over time*.
 
 - Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
 - Runs the reconciliation scheduler.
-- Owns the Redis workflow engine connection.
+- Owns the workflow engine connection. *(Today the process wires its HTTP ports and exposes health,
+  but starts no timer: no sync work runs without the engine, per AGENTS.md §2.5. Workflows are
+  exercised in tests, not yet driven by a running deployment.)*
 
 The workflows live in `@platform/worker` as functions that take ports, so the same unit runs under
 the engine and under a test. It orchestrates over HTTP: the control plane's sync-state surface for
@@ -139,6 +144,11 @@ The seller never sees app keys, binding steps, or API concepts. See ADR 0003.
 
 ### 3.2 Marketplace order arrives
 
+> **Reality check (M3).** No connector implements webhooks yet: TikTok's signature scheme is
+> undocumented, so `supportsWebhooks` is `false` and the integration plane has no receiver to
+> verify against. The **pull path in §3.4 is therefore the only working entry** for orders today;
+> the webhook path below is the design webhooks will use once a channel documents its scheme.
+
 ```
 Marketplace webhook
   -> integration-plane verifies signature
@@ -147,7 +157,7 @@ Marketplace webhook
   -> worker runs import workflow (M3 also runs this pull-only, by cursor):
        step 1: reserve external order ref  (unique: tenant_id, channel, external_order_id)
        step 2: create Medusa order via the tenant's Admin API, with an idempotency key
-       step 3: commit the ref (M4 adds reservation-at-a-stock-location and the pick task)
+       step 3: commit the ref (M4 adds the pick task; reservation-at-a-stock-location is in step 2)
      compensation: find the order by channel-order-link, release it, mark the ref failed
 ```
 
@@ -165,7 +175,8 @@ Stock mutation (sale, return, stock adjustment, inbound PO)
        step 1: resolve each SKU's channel address from the stored listing map (ADR 0009)
        step 2: claim idempotency record keyed by the payload digest
        step 3: connector.pushStock() via the integration plane
-       step 4: record result; on rate limit -> reschedule via governor
+       step 4: record result; on rate limit -> reschedule via governor *(Governor not wired yet:
+     a rate-limited push records its failure but nothing reschedules it until M4.)*
      compensation: none needed (an absolute stock set is idempotent), but failures are recorded
 ```
 

@@ -8,6 +8,10 @@ This file is the **single source of truth for what we are building next**.
 - Work on **one milestone at a time**. Do not start M2 while M1 exit criteria are unmet.
 - A milestone is done only when **every exit criterion is demonstrably met**. "Mostly working"
   is not done.
+- Exit criteria use three markers: `[x]` met and demonstrated; `[ ]` not met; `[~]` **partially
+  met** — the criterion holds at the boundary or on one side of the integration but not the other.
+  `[~]` exists so a half-proven criterion is neither claimed as done nor shown as untouched. The
+  evidence line always says which side is which.
 - Every milestone has **explicit non-goals**. Building a non-goal is a defect, not initiative.
   If you believe a non-goal is required, stop and ask a human.
 - Scope changes go through the **change control** section below, not through a quiet PR.
@@ -20,7 +24,7 @@ This file is the **single source of truth for what we are building next**.
 | M1 | Tenant provisioning (control plane) | Done | M0 |
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
-| M3 | Order import & stock sync (one channel, end-to-end) | In progress (governor done; contract + write-path ADRs await approval) | M2, E0 |
+| M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only, governor not wired | M2, E0 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
@@ -127,6 +131,13 @@ codebase, before any business logic exists.
       `test/tenants.test.ts` asserts credentials are revoked before the state change, that the data
       is scheduled rather than dropped, and that a failure after revocation leaves no live
       credentials and a still-active tenant for retry)*
+- [x] Provisioning seeds the tenant's defaults over its authenticated Admin API. *(verified:
+      `HttpTenantSeeder` creates a default region and a stock location; `test/medusa-seeder.test.ts`
+      covers the tenant region driving the currency, Basic auth, idempotent re-seed, and refusing a
+      missing target or credential. `seed_defaults` runs **after** the admin key is minted, since
+      the seed call needs it — `test/provisioning.test.ts` asserts that order. Verified against a
+      live Medusa that re-seeding creates nothing new. Without this a tenant reaches `active` but
+      its first order cannot be priced or reserved.)*
 
 **Known limits carried into M2**
 
@@ -185,10 +196,13 @@ are mechanical.
       pulled a real order — search returned ids, detail filled 2 line items, `payment.sub_total`
       equalled the summed line totals and `total_amount` matched `grandTotal`. Reproduce with
       `scripts/verify-orders.mjs`.)*
-- [ ] Stock push remains **blocked**: TikTok's `updateInventory` addresses items by a platform
-      `product_id`/`sku_id` that we only obtain once listing import exists, so
-      `capabilities().supportsStockPush` is `false` rather than faked. This is deferred to M3, not a
-      connector gap.
+- [~] Stock push was **blocked in M2** and moved to M3: TikTok's `updateInventory` addresses items by
+      a platform `product_id`/`sku_id` that we only obtain once listing import exists, so the M2
+      connector shipped `capabilities().supportsStockPush` as `false` rather than faking it. **M3
+      then implemented it** — `pushStock` resolves the platform ids from the listing import and the
+      capability is now `true`. What remains unproven is the live path: the push is exercised at the
+      port boundary and against recorded fixtures, not against a real Development Shop. See M3's
+      exit criteria, where listing import is the gate.
 - [x] Contract tests pass offline and cover: token expiry, rate-limit response, partial failure,
       and a malformed response. *(30 tests, no network; `test/connector.test.ts`)*
 - [x] `capabilities()` accurately reflects the two-API split (verified against real responses).
@@ -222,9 +236,6 @@ are mechanical.
   vendored SDK, or TikTok's reference tables. Rather than ship a guessed verifier that could fail
   open, `supportsWebhooks` is `false` and `webhookHandlers()` returns `{}`. Enabling it requires
   the documented algorithm, a `webhook.ts` with tests, and flipping the capability in one change.
-- **Per-line order quantity is unreported.** The published TikTok Shop OAS has no quantity field
-  on order line items. Lines map with `quantity: 0` (a sentinel meaning "not reported", never
-  "zero items") until a live sandbox order confirms the real field name.
 - **The vendored TikTok SDK types are stale.** `GetOrderDetailResponse` lacks `orders[].id`,
   `create_time` and `line_items`, and the detail path has moved from `202309` to `202507`. A
   reviewed local schema (`src/order-schema.ts`) mirrors the official OAS instead of editing
@@ -252,7 +263,9 @@ are mechanical.
 
 **Why this exists.** M2 proved the connector against a live shop, and that surfaced two facts that
 must be settled before any marketplace write can run **in production**: the app enforces an **IP
-allowlist**, and the integration plane that would make calls **does not exist yet**.
+allowlist**, and the integration plane that would make calls did not exist at the time. *The
+integration plane now exists (`apps/services/integration-plane`, see the deliverables below); the
+allowlist remains the one open item.*
 
 **The allowlist is a production-egress concern, not a development blocker.** Development runs on
 OpenHands Cloud, whose egress IP is not registered in Partner Center; that is what produced the
@@ -321,8 +334,9 @@ and stock propagates back without overselling.
 
 **Progress**
 
-- Rate-limit governor: **done** — `packages/rate-governor`, 12 tests with a fake clock (shared
-  app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown).
+- Rate-limit governor: **built but not wired** — `packages/rate-governor`, 12 tests with a fake
+  clock (shared app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown). It
+  has no production caller yet, so no live call is rate limited; see the known limits below.
 - Connector listing read (required before stock push): **accepted** — ADR 0009 (approved
   2026-09-26). Connectors and the `ChannelConnector` interface implement it.
 - Sync state location and commerce write path: **accepted** — ADR 0010 (approved 2026-09-26).
@@ -330,8 +344,10 @@ and stock propagates back without overselling.
   idempotency records, SKU→channel maps, cursors; 16 tests. Control plane exposes it over HTTP
   behind a service token (7 route tests).
 - Order import, listing import, stock push workflows: **done against the ADR 0010 design** —
-  `apps/services/worker`, 15 tests. Each is a function over ports, so it runs unchanged under the
-  M4 engine. Not yet wired into a running process; that is the remaining M3 work below.
+  `apps/services/worker`, 15 tests. Each is a function over ports. The worker process wires the
+  ports and starts, but **runs no workflow on a timer yet**: it exposes a health surface only, per
+  AGENTS.md §2.5 (no sync work without the engine). The workflows are invoked directly in tests and
+  in the live Medusa verification; the M4 engine is what will drive them in a running deployment.
 - `data-plane/modules/channel-order-link`: **verified end-to-end against vanilla Medusa** — module,
   model, service, migration and the module link in `medusa-config/src/links/` all exist, and the
   real-CLI integration test proves the module table *and* the link table (`order_order_channelorderlink_...`,
@@ -340,13 +356,15 @@ and stock propagates back without overselling.
   and that dismissing a link frees the key for re-import. The worker still reaches it over the
   tenant's Admin API (ADR 0010).
 - Tenant Admin API surface the worker calls (`/admin/orders`, `/admin/orders/:id/release`,
-  `/admin/variants`, `/admin/channel-order-links`): **not built** — this is the remaining M3
-  code work before the boundary-proven workflows can run against a live tenant.
+  `/admin/variants`, `/admin/channel-order-links`): **built and exercised against a live Medusa
+  2.21.1** — order import reserves inventory, an oversell is refused with `insufficient_inventory`,
+  a retry succeeds, `release` restores the reservation, and an idempotent replay does not
+  double-reserve. The outstanding gap is the marketplace side, not this surface.
 - Per-tenant Medusa target resolution and credential (ADR 0012): **done** — the worker resolves a
   tenant to `{ baseUrl, secretKey }` through the control plane and presents the key over HTTP Basic
   on a TLS-verified hop; the control plane stores the target and mints the key during provisioning.
-  Wired into `main.ts` but the tenant Admin API routes above do not exist yet, so the end-to-end run
-  still waits on them.
+  Provisioning also seeds the tenant's default region and stock location over that authenticated
+  Admin API (minted before seeding), so a fresh tenant can price and reserve its first order.
 
 **Deliverables**
 
@@ -374,35 +392,47 @@ and stock propagates back without overselling.
 
 **Exit criteria**
 
-Boundary note: the four criteria below are proven at the **port boundary** — the workflows, the sync
-state, and the invariants they hold are real code under test, while the marketplace and the tenant
-Medusa are fakes (AGENTS.md §6 permits this for external boundaries). They are *not yet* proven
-against a live channel and a live Medusa. The blocker is **environment and hosting, not an
-approval**: ADR 0010 is accepted, and the allowlist refusal is specific to OpenHands Cloud (a
-self-hosted server is not blocked — see E0). The evidence line names the exact test; treat a checked
-box as "correct at the boundary", not "shipped".
+Boundary note: the criteria below are proven at the **port boundary** — the workflows, the sync
+state, and the invariants they hold are real code under test, while the marketplace is a fake
+(AGENTS.md §6 permits this for external boundaries). The tenant Medusa is no longer a fake for the
+write path: the Admin routes (`/admin/orders`, `/admin/orders/:id/release`, `/admin/variants`,
+`/admin/channel-order-links`) were exercised against a live Medusa 2.21.1, and the reservation,
+oversell guard, retry, release and idempotent-replay claims below carry that live evidence as well
+as their boundary test. What is still unproven is the **marketplace** side against a live
+Development Shop; the blocker there is environment and hosting, not an approval: ADR 0010 is
+accepted, and the allowlist refusal is specific to OpenHands Cloud (a self-hosted server is not
+blocked — see E0). The evidence line names the exact test; treat a checked box as "correct at the
+boundary", not "shipped".
 
-- [ ] A real order placed on the channel appears in the tenant's Medusa with correct line items,
+- [~] A real order placed on the channel appears in the tenant's Medusa with correct line items,
       totals and inventory reservation. *(Boundary evidence: `worker/test/order-import.test.ts` —
-      "an order placed on the channel lands in Medusa with its lines and a reservation". The
-      reservation ledger is real; the Medusa HTTP call is a fake. Line items are one unit each; see
-      M2's known limit.)*
-- [ ] Re-running the import for the same order (same pull window, twice) creates exactly one order.
+      "an order placed on the channel lands in Medusa with its lines and a reservation". Live
+      evidence against tenant Medusa 2.21.1: a real order imported and reserved 2 units against 10
+      on hand; the marketplace side is still a fake. Line items are one unit each; see M2's known
+      limit.)*
+- [~] Re-running the import for the same order (same pull window, twice) creates exactly one order.
       *(Boundary evidence: "re-running the import for the same order creates exactly one order" —
-      the second run reports `skipped: 1` and the ledger moves once.)*
+      verified. Live evidence: a replay of a committed order did not create a second order or a
+      second reservation; the same-key retry returned the duplicate-link error instead. The durable
+      barrier is the `channel_order_link` unique index, not workflow-transaction resume — the
+      configured in-memory engine does not persist executions.)*
 - [ ] A sale in Medusa propagates to the channel and reduces available stock there, via a listing
       import mapping that resolves the channel `sku_id`. *(Boundary evidence: "a sale in Medusa
       propagates to the channel through the listing mapping" — the push carries
-      `externalProductId`/`externalSkuId` resolved from the stored map, not just the SKU.)*
-- [ ] Concurrent orders across channels never oversell (prove with a concurrency test).
+      `externalProductId`/`externalSkuId` resolved from the stored map, not just the SKU. The
+      marketplace call is still a fake, and nothing in production consults the rate governor; see
+      the known limits below.)*
+- [~] Concurrent orders across channels never oversell (prove with a concurrency test).
       *(Boundary evidence: "concurrent imports of the same order do not oversell or double-create" —
       two racing imports yield one order and five units reserved once; "an order that would oversell
       is refused, and the first order keeps its reservation" — four + four against five on hand
-      leaves one.)*
-- [ ] Compensation test: fail the workflow after order creation, assert reservation is released
+      leaves one. Live evidence against tenant Medusa 2.21.1: an oversell attempt (20 against 8
+      available) was refused with `insufficient_inventory` and left no orphan link.)*
+- [~] Compensation test: fail the workflow after order creation, assert reservation is released
       and no orphan order remains. *(Boundary evidence: "a failure after order creation releases the
       reservation and marks the ref failed" — the order is found via `channel-order-link`, released,
-      and the ref is `failed` with `order.import_failed` published.)*
+      and the ref is `failed` with `order.import_failed` published. Live evidence: `release` restored
+      the reserved quantity back to the pre-import level.)*
 - [x] Rate-limit governor holds under a simulated burst without exceeding the app budget.
       *(evidence: `pnpm --filter @platform/rate-governor test` — 12 tests, 0 failures, fake clock.
       `governor.test.ts`: "a burst within the app budget is allowed and the budget is spent",
@@ -415,8 +445,11 @@ box as "correct at the boundary", not "shipped".
 - Governor state is in-memory per process. With more than one worker replica each replica would
   allow the full app budget, so we would exceed the marketplace limit. Single process is correct
   for M3; the Redis-backed store lands behind the same interface before horizontal scaling.
-- The governor reschedules; it does not yet know the workflow engine's retry semantics, because
-  the worker does not exist. Wiring is part of the import/push workflows below.
+- The governor is a **tested package with no production caller yet**. `packages/rate-governor`
+  passes its own suite (fake clock, 12 tests) but nothing imports it — the worker's transport and
+  the integration plane's connector calls do not consult it, so no live call is actually rate
+  limited. Wiring it into the call path (and teaching it the workflow engine's retry semantics) is
+  open work; do not read the green suite as "rate limiting is in effect".
 - Sync state is in-memory in the running control plane (`InMemorySyncStateStore`), matching the
   service's existing default of "starts with no infrastructure". Every invariant above is enforced
   by that store's real logic, but a restart drops it; the Postgres-backed store lands behind the
