@@ -20,6 +20,7 @@ import { MedusaCliMigrationRunner } from "./migrations.ts";
 import type { TenantMigrationRunner } from "./migrations.ts";
 import { ProvisioningOrchestrator } from "./provisioning.ts";
 import { InMemoryRouteRegistrar, InMemorySeeder, createProvisioningHandlers } from "./steps.ts";
+import { tenantSeederFromEnv } from "./medusa-seeder.ts";
 import { InMemoryAccountStore, SessionManager } from "./identity.ts";
 import { TenantTerminationService } from "./termination.ts";
 import { TenantRegistry } from "./tenants.ts";
@@ -90,7 +91,16 @@ async function main(): Promise<void> {
     handlers: createProvisioningHandlers({
       schemaAdmin,
       migrationRunner,
-      seeder: new InMemorySeeder(),
+      // The real seeder reaches each tenant's Medusa Admin API and is used only when a tenant
+      // engine is configured; otherwise the in-memory one keeps local runs offline (see
+      // `tenantSeederFromEnv`).
+      seeder:
+        tenantSeederFromEnv({
+          keys: medusaAdminKeys,
+          targets: medusaTargets,
+          regionFor: async (tenantId) => (await store.getTenant(tenantId))?.region ?? "id-jkt",
+          logger
+        }) ?? new InMemorySeeder(),
       routes: new InMemoryRouteRegistrar(),
       medusaAdmin: medusaAdminProvisioner
     })

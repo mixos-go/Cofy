@@ -362,3 +362,26 @@ it. Same rule as §9/§10. Full rationale: `docs/adr/0011`.
   (`order_order_channelorderlink_...`) exist in the tenant schema; that is the evidence. The same
   test asserts the partial unique index on `(tenant_id, channel, external_order_id)` rejects a
   duplicate and frees the key after a soft delete — the uniqueness M3's import idempotency rests on.
+- **A generated `MedusaService` method is `softDelete<Plural>`, not `dismiss<Plural>`.** The
+  compensation in `create-channel-order.ts` called `dismissChannelOrderLinks`, which does not
+  exist; the runtime error only surfaces when the failure path actually runs, so a happy-path test
+  never catches it. Probe the generated methods (`listAndCount…`, `softDelete…`) and cover the
+  compensation path with an induced failure, not just the success path.
+- **`stock_locations` on a variant is an array, and it is what a reservation needs.** Reserving
+  against a sales channel requires a location that is stocked *and* associated with that channel;
+  Medusa refuses with `Variant ... is not stocked at any location available to sales channel` when
+  the lookup returned the relation as a scalar or missed the association. Read
+  `stock_locations[].id` and pass those as `location_ids` to `reserveInventoryStep`, or the
+  reservation is silently skipped (`reserved_quantity` stays `0`, an oversell, not an error).
+- **Provisioning must seed a default region and stock location before the tenant is `active`.**
+  Without a region an order cannot be priced; without a stock location its reservation fails, so
+  the first import errors on a tenant that looks provisioned. The seeder reaches the tenant's
+  authenticated Admin API, so the admin credential (ADR 0012) must be minted **before** seeding —
+  the step orders `ensureAdminKey` then `seed`. Seed idempotently by natural key (region by
+  currency, location by name): a country can belong to only one region, so a blind retry turns a
+  resumed provisioning run into a hard failure.
+- **The in-memory workflow engine does not persist executions, so `transactionId` resume is a
+  no-op.** `workflow_execution` stays empty and a repeated request re-executes the workflow. The
+  `channel_order_link` unique index is therefore the real idempotency barrier, not workflow
+  transaction resume; do not document resume behavior the configured engine does not provide.
+

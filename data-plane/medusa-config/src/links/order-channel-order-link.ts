@@ -6,7 +6,16 @@ import ChannelOrderLinkModule from "../../../modules/channel-order-link/src/inde
 // `@medusajs/medusa/order` is CommonJS. Under Node's native type stripping the default import is
 // the CJS `module.exports`, whose own `default` holds the module wrapper; a tsc/esModuleInterop
 // build would have unwrapped it already. Reading the wrapper explicitly keeps both runtimes equal.
-const orderLinkable = (OrderModuleImport as unknown as { default: typeof OrderModuleImport }).default.linkable.order;
+// `defineLink`'s parameter type is a structural union that a CJS namespace does not satisfy, so the
+// linkable is given the minimal structural type `defineLink` actually reads (`toJSON`, plus the
+// arbitrary extra keys a combined source carries) instead of asserting the module's own type.
+type OrderLinkable = Record<string, unknown> & {
+  toJSON(): { serviceName: string; field: string; linkable: string; primaryKey: string };
+};
+
+const orderLinkable = (
+  OrderModuleImport as unknown as { default: { linkable: { order: OrderLinkable } } }
+).default.linkable.order;
 
 /**
  * Attaches `channel_order_link` to the core Order module.

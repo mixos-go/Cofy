@@ -81,7 +81,9 @@ export function createProvisioningHandlers(
     },
 
     seed_defaults: async ({ tenantId, schemaName, logger }) => {
-      await deps.seeder.seed({ tenantId, schemaName });
+      // The credential is minted *before* seeding: the seeder reaches the tenant's Admin API, and
+      // that is an authenticated surface (ADR 0012). Seeding first would fail with a 401 rather
+      // than a clear cause.
       if (deps.medusaAdmin === undefined) {
         // A missing provisioner must not fail provisioning: the data plane is still valid and the
         // credential can be minted later. But a tenant with no credential is unreachable to the
@@ -91,6 +93,7 @@ export function createProvisioningHandlers(
         await deps.medusaAdmin.ensureAdminKey({ tenantId, schemaName });
         logger.info("provisioning.medusa_admin.done", { tenantId });
       }
+      await deps.seeder.seed({ tenantId, schemaName });
       logger.info("provisioning.seed.done", {});
     },
 

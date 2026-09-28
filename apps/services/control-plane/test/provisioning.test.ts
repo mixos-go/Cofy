@@ -275,3 +275,38 @@ test("a missing handler is recorded as failed, not silently skipped", async () =
   assert.equal(step?.status, "failed");
   assert.match(step?.errorMessage ?? "", /No handler registered/);
 });
+
+test("the admin credential is minted before seeding, since seeding calls the authenticated API", async () => {
+  const deps = makeDeps();
+  const tenant = await seedTenant(deps.store);
+  const order: string[] = [];
+  let seededCredentialPresent = false;
+
+  const orchestrator = new ProvisioningOrchestrator({
+    store: deps.store,
+    logger: silentLogger,
+    now: () => "2026-09-27T00:00:01.000Z",
+    handlers: createProvisioningHandlers({
+      schemaAdmin: deps.schemaAdmin,
+      migrationRunner: deps.migrations,
+      seeder: {
+        async seed() {
+          order.push("seed");
+          seededCredentialPresent = order.includes("admin_key");
+        }
+      },
+      routes: deps.routes,
+      medusaAdmin: {
+        async ensureAdminKey() {
+          order.push("admin_key");
+        }
+      }
+    })
+  });
+
+  const run = await orchestrator.provision(tenant.id);
+
+  assert.equal(run.complete, true);
+  assert.equal(seededCredentialPresent, true, "seeding must not run before the credential exists");
+  assert.deepEqual(order, ["admin_key", "seed"]);
+});
