@@ -100,6 +100,9 @@ importers:
       '@platform/observability':
         specifier: workspace:*
         version: link:../../../packages/observability
+      '@platform/secrets':
+        specifier: workspace:*
+        version: link:../../../packages/secrets
       '@platform/sync-state':
         specifier: workspace:*
         version: link:../../../packages/sync-state

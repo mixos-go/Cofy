@@ -17,8 +17,8 @@
  */
 
 import { PlatformError } from "@platform/contracts";
-import type { ChannelCode, TenantId, TenantRecord } from "@platform/contracts";
-import type { SecretStore } from "@platform/secrets";
+import type { ChannelCode, MedusaTargetStore, TenantId, TenantRecord } from "@platform/contracts";
+import type { SecretStore, MedusaAdminKeyStore } from "@platform/secrets";
 import { assertTenantTransition } from "./state.ts";
 import type { Logger } from "./logging.ts";
 import type { TenantSchemaAdmin } from "./tenant-schema.ts";
@@ -36,6 +36,13 @@ export interface TenantTerminationOptions {
   readonly schemaAdmin: TenantSchemaAdmin;
   readonly logger: Logger;
   readonly now?: () => string;
+  /**
+   * The tenant's engine credential and target (ADR 0012). Both are optional so a deployment that
+   * predates them still terminates; when present they are cleared alongside channel credentials,
+   * for the same reason — a terminated tenant must not keep live access to anything.
+   */
+  readonly medusaAdminKeys?: MedusaAdminKeyStore;
+  readonly medusaTargets?: MedusaTargetStore;
   /** Drops any pooled tenant connections so a terminated tenant cannot keep serving. */
   readonly onTerminated?: (tenantId: TenantId) => Promise<void>;
 }
@@ -46,6 +53,8 @@ export class TenantTerminationService {
   readonly #schemaAdmin: TenantSchemaAdmin;
   readonly #logger: Logger;
   readonly #now: () => string;
+  readonly #medusaAdminKeys: MedusaAdminKeyStore | undefined;
+  readonly #medusaTargets: MedusaTargetStore | undefined;
   readonly #onTerminated: ((tenantId: TenantId) => Promise<void>) | undefined;
 
   constructor(options: TenantTerminationOptions) {
@@ -54,6 +63,8 @@ export class TenantTerminationService {
     this.#schemaAdmin = options.schemaAdmin;
     this.#logger = options.logger;
     this.#now = options.now ?? (() => new Date().toISOString());
+    this.#medusaAdminKeys = options.medusaAdminKeys;
+    this.#medusaTargets = options.medusaTargets;
     this.#onTerminated = options.onTerminated;
   }
 
@@ -70,6 +81,13 @@ export class TenantTerminationService {
 
     const revokedChannels = await this.#secrets.deleteAllForTenant(tenantId);
     log.info("termination.credentials_revoked", { channels: revokedChannels.length });
+
+    // The engine credential is revoked with the same priority as channel credentials. A terminated
+    // tenant whose Medusa admin key outlives it is the same class of incident as a live marketplace
+    // token, so this happens before the state change, not after.
+    await this.#medusaAdminKeys?.delete(tenantId);
+    await this.#medusaTargets?.delete(tenantId);
+    if (this.#medusaAdminKeys !== undefined) log.info("termination.medusa_credential_revoked", {});
 
     const scheduledAt = this.#now();
     await this.#schemaAdmin.scheduleDeletion(tenantId, tenant.schemaName, scheduledAt);

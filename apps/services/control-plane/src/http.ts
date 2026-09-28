@@ -20,7 +20,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { PlatformError, httpStatusFor } from "@platform/contracts";
-import type { Capability, ChannelCode, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
+import type { Capability, ChannelCode, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
 import type { SessionManager } from "./identity.ts";
@@ -109,6 +109,8 @@ export interface ControlPlaneApiOptions {
   readonly sessions: SessionManager;
   /** Platform-owned channel sync state (ADR 0010). The worker reaches it only through these routes. */
   readonly syncState: SyncStateStore;
+  /** tenant → Medusa target (ADR 0012). Non-secret; the admin key is read from the secret store. */
+  readonly medusaTargets: MedusaTargetStore;
   /** Bearer tokens the worker presents. Empty means the sync-state surface is closed. */
   readonly serviceTokens: readonly string[];
   readonly logger: Logger;
@@ -343,6 +345,25 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
             entityParam(params)
           )
         })
+    },
+
+    // --- Worker-facing tenant target (ADR 0012). Service-token auth; the key is never returned. ---
+    {
+      method: "GET",
+      path: "/v1/tenants/:tenantId/medusa-target",
+      auth: { kind: "service" },
+      handler: async ({ params }) => {
+        const tenantId = params.tenantId ?? "";
+        const target = await options.medusaTargets.get(tenantId);
+        if (target === null) {
+          // Absence is a hard answer, not a default: the worker must fail the tenant rather than
+          // fall back to some other base URL. TENANT_NOT_FOUND maps to 404 and is not retryable.
+          throw new PlatformError("TENANT_NOT_FOUND", "Tenant has no reachable commerce engine.", {
+            details: { tenantId }
+          });
+        }
+        return { target };
+      }
     }
   ];
 }

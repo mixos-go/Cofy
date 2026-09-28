@@ -13,6 +13,7 @@
  */
 
 import { PlatformError } from "@platform/contracts";
+import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
   ChannelCode,
   ChannelListing,
@@ -106,6 +107,39 @@ export interface MedusaVariant {
   readonly sku: string | null;
 }
 
+/**
+ * The minimal transport shape every HTTP client here depends on.
+ *
+ * Narrower than `typeof fetch` on purpose: the clients only ever read `ok`, `status` and the body,
+ * so a test fake (or the TLS transport below) satisfies this without implementing a full `Response`.
+ */
+export type Transport = (
+  url: string,
+  init: RequestInit
+) => Promise<{ readonly ok: boolean; readonly status: number; text(): Promise<string> }>;
+
+/**
+ * A tenant's commerce engine, as resolved for one call (ADR 0012).
+ *
+ * The credential is tenant-critical: a Medusa secret key carries full admin authority inside its
+ * own instance (only publishable keys can be scoped), so this value must never be logged, cached to
+ * disk, or shared between tenants.
+ */
+export interface ResolvedMedusaTarget {
+  readonly baseUrl: string;
+  readonly secretKey: string;
+}
+
+/**
+ * Resolves a tenant to the engine the worker should call.
+ *
+ * The worker never holds a default base URL: a tenant that cannot be resolved is an error, and a
+ * resolution failure must never silently fall back to another tenant's engine.
+ */
+export interface MedusaTargetResolver {
+  resolve(tenantId: TenantId): Promise<ResolvedMedusaTarget>;
+}
+
 /** The tenant's commerce engine, reached through its own Admin API (ADR 0010). */
 export interface CommerceClient {
   /** Find the variant ids for a set of SKUs. Missing SKUs are simply absent from the result. */
@@ -147,8 +181,14 @@ interface HttpOptions {
   readonly transport?: typeof fetch;
 }
 
+/** Options for the tenant-facing client. The target is resolved per tenant, never configured once. */
+interface CommerceHttpOptions {
+  readonly resolver: MedusaTargetResolver;
+  readonly transport: Transport;
+}
+
 async function request(
-  transport: typeof fetch,
+  transport: Transport,
   url: string,
   init: RequestInit
 ): Promise<unknown> {
@@ -187,6 +227,19 @@ export class HttpSyncStateClient implements SyncStateClient {
       },
       body: JSON.stringify(payload)
     });
+  }
+
+  /** Read a tenant's engine location (ADR 0012). Never returns the credential. */
+  async getMedusaTarget(tenantId: TenantId): Promise<unknown> {
+    const transport = this.#options.transport ?? fetch;
+    return request(
+      transport,
+      `${this.#options.baseUrl}/v1/tenants/${encodeURIComponent(tenantId)}/medusa-target`,
+      {
+        method: "GET",
+        headers: { authorization: `Bearer ${this.#options.serviceToken}` }
+      }
+    );
   }
 
   async reserveOrderRef(input: {
@@ -332,21 +385,29 @@ export class HttpChannelGateway implements ChannelGateway {
   }
 }
 
-/** HTTP client for a tenant's Medusa Admin API. Never its database (ADR 0010). */
+/** HTTP client for a tenant's Medusa Admin API. Never its database (ADR 0010, ADR 0012). */
 export class HttpCommerceClient implements CommerceClient {
-  readonly #options: HttpOptions;
+  readonly #options: CommerceHttpOptions;
 
-  constructor(options: HttpOptions) {
+  constructor(options: CommerceHttpOptions) {
     this.#options = options;
   }
 
-  #request(path: string, init: RequestInit): Promise<unknown> {
-    const transport = this.#options.transport ?? fetch;
-    return request(transport, `${this.#options.baseUrl}${path}`, {
+  /**
+   * Resolve the tenant's target, then issue one authenticated request to it.
+   *
+   * The credential is a Medusa secret API key, which Medusa accepts over HTTP **Basic** — a secret
+   * sent as a Bearer token is rejected (ADR 0012). `tenantId` selects the target and is never
+   * forwarded as a header: the instance already is that tenant.
+   */
+  async #request(tenantId: TenantId, path: string, init: RequestInit): Promise<unknown> {
+    const target = await this.#options.resolver.resolve(tenantId);
+    const credential = Buffer.from(`${target.secretKey}:`, "utf8").toString("base64");
+    return request(this.#options.transport, `${target.baseUrl}${path}`, {
       ...init,
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${this.#options.serviceToken}`,
+        authorization: `Basic ${credential}`,
         ...(init.headers ?? {})
       }
     });
@@ -358,7 +419,7 @@ export class HttpCommerceClient implements CommerceClient {
   }) {
     const query = new URLSearchParams();
     for (const sku of input.skus) query.append("sku", sku);
-    const body = (await this.#request(`/admin/variants?${query.toString()}`, { method: "GET" })) as {
+    const body = (await this.#request(input.tenantId, `/admin/variants?${query.toString()}`, { method: "GET" })) as {
       readonly variants: readonly MedusaVariant[];
     };
     return body.variants;
@@ -370,7 +431,11 @@ export class HttpCommerceClient implements CommerceClient {
     readonly externalOrderId: string;
   }) {
     const query = new URLSearchParams({ channel: input.channel, externalOrderId: input.externalOrderId });
-    const body = (await this.#request(`/admin/channel-order-links?${query.toString()}`, { method: "GET" })) as {
+    const body = (await this.#request(
+      input.tenantId,
+      `/admin/channel-order-links?${query.toString()}`,
+      { method: "GET" }
+    )) as {
       readonly orderId: OrderId | null;
     };
     return body.orderId === null ? null : { orderId: body.orderId };
@@ -382,7 +447,7 @@ export class HttpCommerceClient implements CommerceClient {
     readonly lines: readonly { readonly sku: string; readonly variantId: string; readonly quantity: number }[];
     readonly idempotencyKey: string;
   }) {
-    const body = (await this.#request("/admin/orders", {
+    const body = (await this.#request(input.tenantId, "/admin/orders", {
       method: "POST",
       headers: { "idempotency-key": input.idempotencyKey },
       body: JSON.stringify({ order: input.order, lines: input.lines })
@@ -391,9 +456,43 @@ export class HttpCommerceClient implements CommerceClient {
   }
 
   async releaseOrder(input: { readonly tenantId: TenantId; readonly orderId: OrderId; readonly reason: string }) {
-    await this.#request(`/admin/orders/${encodeURIComponent(input.orderId)}/release`, {
+    await this.#request(input.tenantId, `/admin/orders/${encodeURIComponent(input.orderId)}/release`, {
       method: "POST",
       body: JSON.stringify({ reason: input.reason })
     });
+  }
+}
+
+/**
+ * Resolves a tenant to its Medusa target by asking the control plane, then reading the admin key
+ * from the secret store (ADR 0012).
+ *
+ * The opener hop is the control plane's own service-token surface and carries no seller or tenant
+ * secret, so it uses the plain transport. The key itself never leaves the process here: it goes
+ * from the store into the resolver result and from there into one request header.
+ */
+export class HttpMedusaTargetResolver implements MedusaTargetResolver {
+  readonly #options: {
+    readonly controlPlane: HttpSyncStateClient;
+    readonly keys: MedusaAdminKeyStore;
+  };
+
+  constructor(options: { readonly controlPlane: HttpSyncStateClient; readonly keys: MedusaAdminKeyStore }) {
+    this.#options = options;
+  }
+
+  async resolve(tenantId: TenantId): Promise<ResolvedMedusaTarget> {
+    const { target } = (await this.#options.controlPlane.getMedusaTarget(tenantId)) as {
+      readonly target: { readonly baseUrl: string };
+    };
+    const secretKey = await this.#options.keys.get(tenantId);
+    if (secretKey === null) {
+      // A target without a key would send an empty credential and look like an auth bug at the
+      // tenant. Fail here with the real cause, naming the tenant and never the value.
+      throw new PlatformError("TENANT_NOT_FOUND", "Tenant has no Medusa admin credential.", {
+        details: { tenantId }
+      });
+    }
+    return { baseUrl: target.baseUrl, secretKey };
   }
 }

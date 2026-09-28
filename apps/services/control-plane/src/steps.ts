@@ -42,6 +42,21 @@ export interface ProvisioningDependencies {
   readonly migrationRunner: TenantMigrationRunner;
   readonly seeder: TenantSeeder;
   readonly routes: TenantRouteRegistrar;
+  /**
+   * Mints the tenant's Medusa admin credential and stores it (ADR 0012). Optional so a run without
+   * a reachable tenant engine still provisions the data plane; when absent, the step is skipped and
+   * logged rather than failed, and the worker's target resolution refuses that tenant.
+   */
+  readonly medusaAdmin?: MedusaAdminProvisioner;
+}
+
+/**
+ * Creates the admin API key inside a tenant's Medusa instance and records it where the worker reads
+ * it. Idempotent: on a resumed provisioning run it must converge on one usable credential rather
+ * than mint a second live key (M1's rule that every step is re-runnable).
+ */
+export interface MedusaAdminProvisioner {
+  ensureAdminKey(input: { readonly tenantId: TenantId; readonly schemaName: string }): Promise<void>;
 }
 
 export function createProvisioningHandlers(
@@ -67,6 +82,15 @@ export function createProvisioningHandlers(
 
     seed_defaults: async ({ tenantId, schemaName, logger }) => {
       await deps.seeder.seed({ tenantId, schemaName });
+      if (deps.medusaAdmin === undefined) {
+        // A missing provisioner must not fail provisioning: the data plane is still valid and the
+        // credential can be minted later. But a tenant with no credential is unreachable to the
+        // worker, so say so loudly rather than let it look provisioned.
+        logger.warn("provisioning.medusa_admin.skipped", { tenantId });
+      } else {
+        await deps.medusaAdmin.ensureAdminKey({ tenantId, schemaName });
+        logger.info("provisioning.medusa_admin.done", { tenantId });
+      }
       logger.info("provisioning.seed.done", {});
     },
 

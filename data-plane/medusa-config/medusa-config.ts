@@ -48,6 +48,13 @@ export function databaseSslOptions(
  * module's `src/links/` can join it to the core Order module (ADR 0010).
  */
 export default defineConfig({
+  // A tenant instance serves the Admin *API* our worker and control plane call; it never serves
+  // the Medusa dashboard to a browser, for the same reason `adminCors` stays empty. Leaving the
+  // dashboard enabled makes boot depend on `medusa build` output (`index.html`), which a freshly
+  // provisioned tenant does not have, so `medusa start` fails before any route is reachable.
+  admin: {
+    disable: true
+  },
   projectConfig: {
     databaseUrl: process.env.DATABASE_URL,
     databaseSchema: process.env.DATABASE_SCHEMA,

@@ -342,6 +342,11 @@ and stock propagates back without overselling.
 - Tenant Admin API surface the worker calls (`/admin/orders`, `/admin/orders/:id/release`,
   `/admin/variants`, `/admin/channel-order-links`): **not built** — this is the remaining M3
   code work before the boundary-proven workflows can run against a live tenant.
+- Per-tenant Medusa target resolution and credential (ADR 0012): **done** — the worker resolves a
+  tenant to `{ baseUrl, secretKey }` through the control plane and presents the key over HTTP Basic
+  on a TLS-verified hop; the control plane stores the target and mints the key during provisioning.
+  Wired into `main.ts` but the tenant Admin API routes above do not exist yet, so the end-to-end run
+  still waits on them.
 
 **Deliverables**
 

@@ -9,6 +9,7 @@ import type { ChannelCode, TenantId } from "@platform/contracts";
  */
 
 export * from "./credential-store.ts";
+export * from "./medusa-admin-key.ts";
 
 export interface SecretRef {
   readonly tenantId: TenantId;

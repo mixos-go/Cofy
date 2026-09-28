@@ -23,6 +23,7 @@ import { InMemoryAccountStore, SessionManager } from "../src/identity.ts";
 import { TenantTerminationService } from "../src/termination.ts";
 import { TenantRegistry } from "../src/tenants.ts";
 import { createControlPlaneServer } from "../src/http.ts";
+import { InMemoryMedusaTargetStore } from "../src/medusa-target.ts";
 import { createLogger } from "../src/logging.ts";
 
 const GOOD_PASSWORD = "correct horse battery";
@@ -35,6 +36,7 @@ interface Harness {
   accounts: InMemoryAccountStore;
   schemaAdmin: InMemoryTenantSchemaAdmin;
   syncState: InMemorySyncStateStore;
+  medusaTargets: InMemoryMedusaTargetStore;
   close: () => Promise<void>;
 }
 
@@ -76,6 +78,7 @@ async function startHarness(): Promise<Harness> {
   const accounts = new InMemoryAccountStore();
   const sessions = new SessionManager({ accounts, now: () => NOW });
   const syncState = new InMemorySyncStateStore();
+  const medusaTargets = new InMemoryMedusaTargetStore();
 
   const server = createControlPlaneServer({
     registry,
@@ -83,6 +86,7 @@ async function startHarness(): Promise<Harness> {
     termination,
     sessions,
     syncState,
+    medusaTargets,
     serviceTokens: [SERVICE_TOKEN],
     logger
   });
@@ -96,6 +100,7 @@ async function startHarness(): Promise<Harness> {
     accounts,
     schemaAdmin,
     syncState,
+    medusaTargets,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -350,6 +355,35 @@ test("the API", async (t) => {
 
     assert.equal((await call()).kind, "reserved");
     assert.equal((await call()).kind, "exists");
+  });
+
+  await t.test("the medusa target surface is service-only and never returns a credential", async () => {
+    await harness.medusaTargets.set({ tenantId, baseUrl: "https://tenant-a.medusa.example" });
+
+    const withoutToken = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}/medusa-target`);
+    assert.equal(withoutToken.status, 401);
+
+    const withSession = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}/medusa-target`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    // An operator session is not the worker's credential: different trust, so it must not resolve.
+    assert.equal(withSession.status, 401);
+
+    const response = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}/medusa-target`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { target: Record<string, unknown> };
+    assert.equal(body.target.baseUrl, "https://tenant-a.medusa.example");
+    // The key is not part of this response at all; assert on the shape, not just absence of a name.
+    assert.deepEqual(Object.keys(body.target).sort(), ["baseUrl", "tenantId"]);
+  });
+
+  await t.test("a tenant with no target is a hard 404, not an empty target", async () => {
+    const response = await fetch(`${harness.baseUrl}/v1/tenants/tnt-missing/medusa-target`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(response.status, 404);
   });
 
   await t.test("an unknown channel on the sync surface is a validation failure", async () => {

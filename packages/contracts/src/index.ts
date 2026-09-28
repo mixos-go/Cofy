@@ -6,3 +6,4 @@ export * from "./errors.ts";
 export * from "./events.ts";
 export * from "./tenant.ts";
 export * from "./identity.ts";
+export * from "./medusa-target.ts";

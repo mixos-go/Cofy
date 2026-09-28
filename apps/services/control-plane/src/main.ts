@@ -7,9 +7,9 @@
  */
 
 import { Pool } from "pg";
-import type { TenantId } from "@platform/contracts";
-import { InMemorySecretStore } from "@platform/secrets";
-import type { SecretStore } from "@platform/secrets";
+import type { MedusaTargetStore, TenantId } from "@platform/contracts";
+import { InMemorySecretStore, InMemoryMedusaAdminKeyStore } from "@platform/secrets";
+import type { SecretStore, MedusaAdminKeyStore } from "@platform/secrets";
 import { createLogger } from "./logging.ts";
 import type { LogLevel } from "./logging.ts";
 import { InMemoryTenantStore } from "./tenant-store.ts";
@@ -27,6 +27,8 @@ import { createControlPlaneServer } from "./http.ts";
 import { TenantClient } from "@platform/tenant-client";
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import type { SyncStateStore } from "@platform/sync-state";
+import { InMemoryMedusaTargetStore } from "./medusa-target.ts";
+import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
 
 async function main(): Promise<void> {
   const logger = createLogger((process.env.LOG_LEVEL as LogLevel | undefined) ?? "info");
@@ -71,6 +73,17 @@ async function main(): Promise<void> {
     }
   });
 
+  // Tenant → Medusa target and the platform-issued admin key (ADR 0012). Declared before
+  // provisioning because the provisioning run mints the credential. Both are non-secret at rest
+  // here: the target is a URL, and the key store never returns values to a lister.
+  const medusaTargets: MedusaTargetStore = new InMemoryMedusaTargetStore();
+  const medusaAdminKeys: MedusaAdminKeyStore = new InMemoryMedusaAdminKeyStore();
+  const medusaAdminProvisioner = medusaAdminProvisionerFromEnv({
+    keys: medusaAdminKeys,
+    targets: medusaTargets,
+    logger
+  });
+
   const provisioning = new ProvisioningOrchestrator({
     store,
     logger,
@@ -78,7 +91,8 @@ async function main(): Promise<void> {
       schemaAdmin,
       migrationRunner,
       seeder: new InMemorySeeder(),
-      routes: new InMemoryRouteRegistrar()
+      routes: new InMemoryRouteRegistrar(),
+      medusaAdmin: medusaAdminProvisioner
     })
   });
 
@@ -87,6 +101,8 @@ async function main(): Promise<void> {
     secrets,
     schemaAdmin,
     logger,
+    medusaAdminKeys,
+    medusaTargets,
     onTerminated: (tenantId) => tenantClient.evict(tenantId)
   });
 
@@ -123,6 +139,7 @@ async function main(): Promise<void> {
     termination,
     sessions,
     syncState,
+    medusaTargets,
     serviceTokens,
     logger
   });
