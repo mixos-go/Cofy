@@ -12,7 +12,7 @@
  * rather than from a status number.
  */
 
-import { PlatformError } from "@platform/contracts";
+import { PlatformError, isRetryable } from "@platform/contracts";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
   ChannelCode,
@@ -198,13 +198,14 @@ async function request(
 
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string; details?: unknown } } | null)?.error;
-    // Rebuild the platform error so retry policy is decided by code, not by HTTP status. An
-    // unparseable error body is an upstream failure, never a silent success.
-    throw new PlatformError(
-      (error?.code as PlatformError["code"] | undefined) ?? "UPSTREAM_ERROR",
-      error?.message ?? `Request failed with status ${response.status}.`,
-      { retryable: response.status >= 500, details: (error?.details as Record<string, unknown>) ?? {} }
-    );
+    // Rebuild the platform error so retry policy is decided by code, not by HTTP status. A
+    // CHANNEL_RATE_LIMITED arrives as a 429, which `status >= 500` would wrongly call terminal, so
+    // retryability comes from the taxonomy helper. An unparseable body is upstream, never success.
+    const code = (error?.code as PlatformError["code"] | undefined) ?? "UPSTREAM_ERROR";
+    throw new PlatformError(code, error?.message ?? `Request failed with status ${response.status}.`, {
+      retryable: isRetryable(response.status, code),
+      details: (error?.details as Record<string, unknown>) ?? {}
+    });
   }
   return body;
 }

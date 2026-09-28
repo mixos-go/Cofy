@@ -56,6 +56,27 @@ export class RateLimitedError extends PlatformError {
   }
 }
 
+/**
+ * Codes that are worth retrying even when the HTTP status alone would not say so.
+ *
+ * The worker rebuilds an error from an HTTP response where it can only see a status code, and a
+ * status is not enough: the shared governor answers a throttled call with `429` and
+ * `CHANNEL_RATE_LIMITED`, which is retryable even though 429 is not a 5xx. Consulting the code
+ * keeps that decision intact across the service boundary. Codes that already arrive as a 5xx do not
+ * belong here — the status is trusted for those.
+ */
+const RETRYABLE_CODES: ReadonlySet<PlatformErrorCode> = new Set(["CHANNEL_RATE_LIMITED"]);
+
+/**
+ * Retryability for a code observed only as an HTTP status.
+ *
+ * `status >= 500` is the baseline the rest of the stack already uses; this adds the codes whose
+ * retryability a status understates.
+ */
+export function isRetryable(status: number, code: PlatformErrorCode): boolean {
+  return status >= 500 || RETRYABLE_CODES.has(code);
+}
+
 /** HTTP status for a platform error, so every route maps failures the same way. */
 export function httpStatusFor(code: PlatformErrorCode): number {
   switch (code) {

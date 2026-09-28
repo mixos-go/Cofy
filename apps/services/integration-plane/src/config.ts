@@ -9,6 +9,21 @@
  */
 
 import { PlatformError } from "@platform/contracts";
+import type { ChannelCode } from "@platform/contracts";
+import type { RateLimitBudget } from "@platform/rate-governor";
+
+/**
+ * Fallback app budgets, used when a channel has no explicit configuration.
+ *
+ * These are **placeholders**, not measured limits: the point is that an unconfigured channel gets a
+ * real, conservative budget rather than an unlimited one. The governor never treats "no budget" as
+ * "no limit", so a missing entry here would block the channel outright. Real per-channel values are
+ * set with `RATE_LIMIT_APP_BUDGETS` once each marketplace's published limit is confirmed.
+ */
+const DEFAULT_APP_BUDGETS: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>> = {
+  tiktok_tokopedia: { capacity: 10, refillPerSecond: 2 },
+  shopee: { capacity: 10, refillPerSecond: 2 }
+};
 
 export interface IntegrationPlaneConfig {
   readonly port: number;
@@ -20,6 +35,12 @@ export interface IntegrationPlaneConfig {
   readonly publicBaseUrl: string;
   /** Bearer tokens the control plane and worker present. Never empty; the service fails closed. */
   readonly serviceTokens: readonly string[];
+  /**
+   * Per-channel app budgets. Read here so the governor cannot be built with an empty map by
+   * accident — an empty map is "block every call", which would be a silent outage rather than a
+   * configuration error.
+   */
+  readonly rateBudgets: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>>;
   readonly tiktok: { readonly appKey: string; readonly appSecret: string } | null;
   readonly shopee: {
     readonly partnerId: number;
@@ -47,6 +68,50 @@ function parsePort(raw: string | undefined, fallback: number): number {
     });
   }
   return port;
+}
+
+/**
+ * Parse per-channel app budgets from `RATE_LIMIT_APP_BUDGETS`, a JSON object.
+ *
+ * Deliberately strict: a malformed budget must stop startup, because the alternative is a governor
+ * that silently falls back to the placeholder for a channel whose real limit is different — which
+ * is the exact overspending this governor exists to prevent.
+ */
+function parseRateBudgets(raw: string | undefined): Readonly<Partial<Record<ChannelCode, RateLimitBudget>>> {
+  if (raw === undefined || raw === "") return DEFAULT_APP_BUDGETS;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new PlatformError("VALIDATION_FAILED", "RATE_LIMIT_APP_BUDGETS is not valid JSON.", {
+      details: { variable: "RATE_LIMIT_APP_BUDGETS" }
+    });
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new PlatformError("VALIDATION_FAILED", "RATE_LIMIT_APP_BUDGETS must be a JSON object.", {
+      details: { variable: "RATE_LIMIT_APP_BUDGETS" }
+    });
+  }
+
+  const budgets: Partial<Record<ChannelCode, RateLimitBudget>> = {};
+  for (const [channel, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const entry = value as { capacity?: unknown; refillPerSecond?: unknown };
+    const capacity = entry?.capacity;
+    const refillPerSecond = entry?.refillPerSecond;
+    if (
+      typeof capacity !== "number" ||
+      capacity <= 0 ||
+      typeof refillPerSecond !== "number" ||
+      refillPerSecond <= 0
+    ) {
+      throw new PlatformError("VALIDATION_FAILED", `RATE_LIMIT_APP_BUDGETS entry for ${channel} is invalid.`, {
+        details: { channel }
+      });
+    }
+    budgets[channel as ChannelCode] = { capacity, refillPerSecond };
+  }
+  return budgets;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): IntegrationPlaneConfig {
@@ -98,6 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): IntegrationPlaneConfig {
     port: parsePort(env.INTEGRATION_PLANE_PORT, 4002),
     publicBaseUrl,
     serviceTokens,
+    rateBudgets: parseRateBudgets(env.RATE_LIMIT_APP_BUDGETS),
     tiktok,
     shopee
   };

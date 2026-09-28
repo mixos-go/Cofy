@@ -72,9 +72,11 @@ Owns everything about *talking to the outside world*.
   redirect URI is derived from configured public origin, never from a request header.
 - Seller credentials: the callback persists what the connector returns via
   `packages/secrets`' `CredentialStore`; the probe path proves a stored credential still works.
-- Rate-limit governor: global scheduling per app key and per seller. *(The package exists and is
-  tested, but no caller consults it yet — no live call is actually rate limited; see M3's known
-  limits in `PLAN.md`.)*
+- Rate-limit governor: global scheduling per app key and per seller. *(Enforced here for every
+  order page, listing page, stock push and probe: `governor.acquire` runs first, a denial is a `429`
+  with `Retry-After`, and a `Retry-After` from the marketplace pauses the channel for every tenant.
+  Automatic rescheduling (the engine re-running a refused call) is still M4; M3 enforces the budget
+  but does not requeue by itself.)*
 - Credential refresh scheduling.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
@@ -175,8 +177,9 @@ Stock mutation (sale, return, stock adjustment, inbound PO)
        step 1: resolve each SKU's channel address from the stored listing map (ADR 0009)
        step 2: claim idempotency record keyed by the payload digest
        step 3: connector.pushStock() via the integration plane
-       step 4: record result; on rate limit -> reschedule via governor *(Governor not wired yet:
-     a rate-limited push records its failure but nothing reschedules it until M4.)*
+       step 4: record result; on rate limit -> reschedule via governor *(Enforcement is live: the
+     integration plane refuses an over-budget call with a 429 + Retry-After and records the
+     failure. The automatic re-run of that call is M4 — nothing requeues it yet.)*
      compensation: none needed (an absolute stock set is idempotent), but failures are recorded
 ```
 

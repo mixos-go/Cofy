@@ -57,6 +57,14 @@ export interface IdempotencyRecord {
   readonly outcome: IdempotencyOutcome;
   /** Opaque JSON the operation returned, replayed to a caller that retries the same key. */
   readonly result: unknown;
+  /**
+   * Lease deadline while `in_progress`; null once the claim is terminal.
+   *
+   * A crashed attempt would otherwise hold the key forever and make every later retry a skip
+   * rather than a repair. After this instant another attempt may take the key over, which is why
+   * the value is part of the durable record rather than the holder's memory.
+   */
+  readonly expiresAt: Instant | null;
   readonly createdAt: Instant;
   readonly updatedAt: Instant;
 }

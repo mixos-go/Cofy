@@ -19,6 +19,7 @@
     "@platform/connector-tiktok-tokopedia": "workspace:*",
     "@platform/contracts": "workspace:*",
     "@platform/observability": "workspace:*",
+    "@platform/rate-governor": "workspace:*",
     "@platform/secrets": "workspace:*",
     "zod": "^3.24.1"
   },

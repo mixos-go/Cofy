@@ -203,6 +203,150 @@ test("idempotency keys are scoped per tenant", async () => {
   assert.equal(other.kind, "claimed");
 });
 
+test("an expired in-flight claim is reclaimed, so a crashed attempt does not block the order forever", async () => {
+  const state = store();
+  // The holder is assumed dead: its lease has passed without it completing the operation.
+  await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    leaseTtlMs: 1000,
+    now: NOW
+  });
+
+  const later = new Date(new Date(NOW).getTime() + 1001).toISOString();
+  const second = await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    now: later
+  });
+
+  assert.equal(second.kind, "claimed");
+});
+
+test("a claim whose lease has not expired still blocks a second attempt", async () => {
+  const state = store();
+  await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    leaseTtlMs: 5_000,
+    now: NOW
+  });
+
+  const soon = new Date(new Date(NOW).getTime() + 4_999).toISOString();
+  const second = await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    now: soon
+  });
+
+  assert.equal(second.kind, "in_flight");
+});
+
+test("stealing an expired claim clears the previous attempt's partial result", async () => {
+  const state = store();
+  await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "stock.push",
+    fingerprint: "fp-1",
+    leaseTtlMs: 1000,
+    now: NOW
+  });
+
+  const later = new Date(new Date(NOW).getTime() + 2000).toISOString();
+  await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "stock.push",
+    fingerprint: "fp-1",
+    now: later
+  });
+
+  // A replay must never hand back a value no attempt completed; the stolen record must read as a
+  // fresh in-progress claim with a new lease, not as the old holder's leftovers.
+  const record = await state.getIdempotency("tnt-a", "k1");
+  assert.equal(record?.outcome, "in_progress");
+  assert.equal(record?.result, null);
+  assert.ok(record?.expiresAt !== null && record.expiresAt > later);
+});
+
+test("completing an already-succeeded claim with the same outcome is a no-op, not a conflict", async () => {
+  const state = store();
+  await state.claimIdempotency({ tenantId: "tnt-a", key: "k1", operation: "stock.push", fingerprint: "fp-1", now: NOW });
+  await state.completeIdempotency({ tenantId: "tnt-a", key: "k1", outcome: "succeeded", result: { pushed: 1 }, now: NOW });
+
+  // A stolen lease can leave two attempts finishing the same idempotent write; the second success
+  // must not be reported as an error the workflow would misread as a failed write.
+  const again = await state.completeIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    outcome: "succeeded",
+    result: { pushed: 1 },
+    now: NOW
+  });
+  assert.equal(again.outcome, "succeeded");
+
+  // The first result stands: a repeat success does not overwrite what was recorded.
+  assert.deepEqual(again.result, { pushed: 1 });
+});
+
+test("a terminal claim has no lease and cannot be stolen", async () => {
+  const state = store();
+  await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    leaseTtlMs: 1000,
+    now: NOW
+  });
+  await state.completeIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    outcome: "succeeded",
+    result: { orderId: "order-1" },
+    now: NOW
+  });
+
+  const record = await state.getIdempotency("tnt-a", "k1");
+  assert.equal(record?.expiresAt, null);
+
+  // Long after any lease would have lapsed, a replay still replays: a completed operation is final.
+  const muchLater = new Date(new Date(NOW).getTime() + 86_400_000).toISOString();
+  const replay = await state.claimIdempotency({
+    tenantId: "tnt-a",
+    key: "k1",
+    operation: "order.create",
+    fingerprint: "fp-1",
+    now: muchLater
+  });
+  assert.equal(replay.kind, "replay");
+});
+
+test("a non-positive lease TTL is rejected rather than creating an instantly-stealable claim", async () => {
+  const state = store();
+  await assert.rejects(
+    () =>
+      state.claimIdempotency({
+        tenantId: "tnt-a",
+        key: "k1",
+        operation: "op",
+        fingerprint: "fp",
+        leaseTtlMs: 0,
+        now: NOW
+      }),
+    RangeError
+  );
+});
+
 test("a SKU map upsert replaces the previous mapping for that SKU", async () => {
   const state = store();
   await state.upsertSkuMap({

@@ -24,7 +24,7 @@ This file is the **single source of truth for what we are building next**.
 | M1 | Tenant provisioning (control plane) | Done | M0 |
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
-| M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only, governor not wired | M2, E0 |
+| M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
 | M4 | Reconciliation & drift repair | Not started | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
@@ -334,17 +334,21 @@ and stock propagates back without overselling.
 
 **Progress**
 
-- Rate-limit governor: **built but not wired** — `packages/rate-governor`, 12 tests with a fake
-  clock (shared app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown). It
-  has no production caller yet, so no live call is rate limited; see the known limits below.
+- Rate-limit governor: **built and wired** — `packages/rate-governor` (12 tests with a fake clock:
+  shared app-key budget, per-seller fairness, no spend on denial, Retry-After cooldown) is enforced
+  by the integration plane, which is the only caller: every order page, listing page, stock push and
+  probe goes through `governor.acquire` first, a denial becomes a `429` with `Retry-After`, and a
+  `Retry-After` the marketplace returns pauses the channel for every tenant. See the known limits
+  for what is still not covered (one process's memory; rescheduling into the workflow engine is M4).
 - Connector listing read (required before stock push): **accepted** — ADR 0009 (approved
   2026-09-26). Connectors and the `ChannelConnector` interface implement it.
 - Sync state location and commerce write path: **accepted** — ADR 0010 (approved 2026-09-26).
 - `packages/sync-state` (ADR 0010 data shape): **done** — external-order refs, payload-keyed
-  idempotency records, SKU→channel maps, cursors; 16 tests. Control plane exposes it over HTTP
-  behind a service token (7 route tests).
+  idempotency records (with an expiring lease, so a crashed attempt is reclaimable), SKU→channel
+  maps, cursors; 22 tests. Control plane exposes it over HTTP behind a service token (7 route
+  tests).
 - Order import, listing import, stock push workflows: **done against the ADR 0010 design** —
-  `apps/services/worker`, 15 tests. Each is a function over ports. The worker process wires the
+  `apps/services/worker`, 20 tests. Each is a function over ports. The worker process wires the
   ports and starts, but **runs no workflow on a timer yet**: it exposes a health surface only, per
   AGENTS.md §2.5 (no sync work without the engine). The workflows are invoked directly in tests and
   in the live Medusa verification; the M4 engine is what will drive them in a running deployment.
@@ -420,8 +424,8 @@ boundary", not "shipped".
       import mapping that resolves the channel `sku_id`. *(Boundary evidence: "a sale in Medusa
       propagates to the channel through the listing mapping" — the push carries
       `externalProductId`/`externalSkuId` resolved from the stored map, not just the SKU. The
-      marketplace call is still a fake, and nothing in production consults the rate governor; see
-      the known limits below.)*
+      marketplace call itself is still a fake in the worker tests, but the integration plane now
+      rate-limits it; see the known limits below.)*
 - [~] Concurrent orders across channels never oversell (prove with a concurrency test).
       *(Boundary evidence: "concurrent imports of the same order do not oversell or double-create" —
       two racing imports yield one order and five units reserved once; "an order that would oversell
@@ -438,25 +442,29 @@ boundary", not "shipped".
       `governor.test.ts`: "a burst within the app budget is allowed and the budget is spent",
       "the app budget is shared, so one tenant can exhaust capacity for a channel",
       "a denied call does not spend budget", "a channel-wide cooldown from Retry-After blocks
-      every tenant, then lifts".)*
+      every tenant, then lifts". Wiring evidence: `apps/services/integration-plane/test/http.test.ts`
+      — "a call over the app budget is refused with a 429 and a Retry-After, and never reaches the
+      connector" and "a rate-limit response from the channel pauses every tenant on that channel";
+      `apps/services/worker/test/ports.test.ts` proves the 429 stays retryable across the boundary.)*
 
 **Known limits (recorded, not hidden)**
 
-- Governor state is in-memory per process. With more than one worker replica each replica would
-  allow the full app budget, so we would exceed the marketplace limit. Single process is correct
-  for M3; the Redis-backed store lands behind the same interface before horizontal scaling.
-- The governor is a **tested package with no production caller yet**. `packages/rate-governor`
-  passes its own suite (fake clock, 12 tests) but nothing imports it — the worker's transport and
-  the integration plane's connector calls do not consult it, so no live call is actually rate
-  limited. Wiring it into the call path (and teaching it the workflow engine's retry semantics) is
-  open work; do not read the green suite as "rate limiting is in effect".
+- Governor state is in-memory per process. With more than one instance each process would allow the
+  full app budget, so we would exceed the marketplace limit. Single process is correct for M3; the
+  Redis-backed store lands behind the same interface before horizontal scaling.
+- The governor now gates the call, but rescheduling is not yet automatic: a refused call returns
+  `429` and records the failure, and nothing re-runs it until M4 teaches the workflow engine to
+  reschedule on `CHANNEL_RATE_LIMITED`. The budget is enforced (no over-budget call leaves the
+  plane); the work is not yet requeued by itself.
 - Sync state is in-memory in the running control plane (`InMemorySyncStateStore`), matching the
   service's existing default of "starts with no infrastructure". Every invariant above is enforced
   by that store's real logic, but a restart drops it; the Postgres-backed store lands behind the
   same interface (ADR 0010) before any durable deployment.
-- An idempotency claim that is left `in_flight` by a crashed attempt is never expired. A later
-  import of that order is skipped, not retried, until reconciliation clears it. The claim needs an
-  expiry/steal policy, which is M4's reconciliation work, not a silent gap.
+- An idempotency claim is a lease with a fixed TTL (default 5 minutes). A crashed attempt is
+  therefore reclaimable by a later retry after the lease passes; reconciliation is no longer the
+  only repair path. The TTL is a guess, not a measurement: too short and a slow-but-alive call is
+  preempted into a second call (safe only because the write is idempotent), too long and a crash
+  blocks that order for the whole TTL. Measure against real call latencies before hardening it.
 - The stock-push idempotency key is a digest of the pushed payload. That makes an unchanged re-push
   a replay and a changed value a new operation (both tested), but it also means two *different*
   channels' pushes are separate keys by construction, and a partially-rejected batch is recorded as

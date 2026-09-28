@@ -17,6 +17,8 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import type { ChannelCapabilities, ChannelConnector, Credential } from "@platform/channel-sdk";
 import type { ChannelListing, ChannelOrder, Cursor, Page } from "@platform/contracts";
+import { RateLimitedError } from "@platform/contracts";
+import { RateLimitGovernor } from "@platform/rate-governor";
 import { createLogger } from "@platform/observability";
 import { CredentialStore, InMemorySecretStore } from "@platform/secrets";
 import { InMemoryOAuthStateStore } from "../src/oauth-state.ts";
@@ -36,6 +38,8 @@ class RecordingConnector implements ChannelConnector {
   ordersInPage = 0;
   caughtUp = true;
   fetchOrdersError: Error | null = null;
+  /** How many times the real connector method was reached, to prove a denied call was not sent. */
+  orderFetches = 0;
 
   /** The credential `completeAuthorization` will hand back. */
   credential: Credential = {
@@ -68,6 +72,7 @@ class RecordingConnector implements ChannelConnector {
   }
 
   async fetchOrders(_cursor: Cursor, credential: Credential): Promise<Page<ChannelOrder>> {
+    this.orderFetches += 1;
     this.lastFetchCredential = credential;
     if (this.fetchOrdersError !== null) throw this.fetchOrdersError;
     return {
@@ -132,15 +137,25 @@ interface Harness {
   connector: RecordingConnector;
   credentials: CredentialStore;
   states: InMemoryOAuthStateStore;
+  governor: RateLimitGovernor;
   close: () => Promise<void>;
 }
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(
+  options: { readonly appCapacity?: number } = {}
+): Promise<Harness> {
   const logger = createLogger("error", {}, () => {});
   const connector = new RecordingConnector();
   const secrets = new InMemorySecretStore();
   const credentials = new CredentialStore(secrets);
   const states = new InMemoryOAuthStateStore();
+  // A large-but-finite budget by default so tests that are not about rate limiting never trip it;
+  // the rate-limit tests pass a small capacity to reach the limit deliberately.
+  const governor = new RateLimitGovernor({
+    appBudgets: {
+      tiktok_tokopedia: { capacity: options.appCapacity ?? 1000, refillPerSecond: 1 }
+    }
+  });
 
   const channels: RegisteredChannel[] = [{ channel: "tiktok_tokopedia", connector }];
 
@@ -150,6 +165,7 @@ async function startHarness(): Promise<Harness> {
     publicBaseUrl: PUBLIC_BASE_URL,
     oauthStates: states,
     serviceTokens: [SERVICE_TOKEN],
+    governor,
     logger
   });
 
@@ -162,6 +178,7 @@ async function startHarness(): Promise<Harness> {
     connector,
     credentials,
     states,
+    governor,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -543,6 +560,78 @@ test("the stock route hands the connector the payload with its marketplace addre
     assert.deepEqual(h.connector.lastStockItems, [
       { sku: "SKU-1", available: 5, externalProductId: "prod-1", externalSkuId: "sku-1" }
     ]);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a call over the app budget is refused with a 429 and a Retry-After, and never reaches the connector", async () => {
+  // One token, positive refill. The first call spends it; the second must be refused rather than
+  // sent, because the governor exists precisely to keep the marketplace from seeing the overflow.
+  const h = await startHarness({ appCapacity: 1 });
+  try {
+    await connect(h);
+
+    const first = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+    assert.equal(first.status, 200);
+    const fetchesAfterFirst = h.connector.orderFetches;
+
+    const second = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+    assert.equal(second.status, 429);
+    assert.ok(second.headers.get("retry-after") !== null, "a 429 must tell the caller when to retry");
+
+    const body = (await second.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "CHANNEL_RATE_LIMITED");
+
+    // The point of the refusal: the marketplace was not called a second time.
+    assert.equal(h.connector.orderFetches, fetchesAfterFirst);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a rate-limit response from the channel pauses every tenant on that channel", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    await h.credentials.put({
+      tenantId: "tnt-b",
+      channel: "tiktok_tokopedia",
+      accessToken: "act.stored-b",
+      refreshToken: "rft.stored-b",
+      expiresAt: null,
+      context: { shopCipher: "cipher-stored-b" }
+    });
+    h.connector.fetchOrdersError = new RateLimitedError("TikTok says slow down.", 30);
+
+    const first = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+    assert.equal(first.status, 429);
+    assert.equal(first.headers.get("retry-after"), "30");
+
+    h.connector.fetchOrdersError = null;
+    h.connector.orderFetches = 0;
+
+    // A different tenant on the same channel inherits the cooldown: the app key is shared, so one
+    // tenant's rate limit is everyone's, and the second call must not go out.
+    const second = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/orders/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-b", cursor: null })
+    });
+    assert.equal(second.status, 429);
+    assert.equal(h.connector.orderFetches, 0, "the channel was not called during the cooldown");
   } finally {
     await h.close();
   }

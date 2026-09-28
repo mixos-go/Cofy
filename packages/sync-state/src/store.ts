@@ -74,15 +74,26 @@ export interface SyncStateStore {
    * Claim an idempotency key before an outbound write (AGENTS.md §2.4). Returns `replay` when the
    * operation already succeeded, `in_flight` when another attempt holds the key, and `claimed`
    * when this caller now owns it.
+   *
+   * A claim is a *lease*: if the holder dies, `expiresAt` passes and the next caller steals the
+   * key and proceeds. Without that, one crash would make every later retry a skip and only
+   * reconciliation could repair it.
    */
   claimIdempotency(input: {
     readonly tenantId: TenantId;
     readonly key: string;
     readonly operation: string;
     readonly fingerprint: string;
+    readonly leaseTtlMs?: number;
     readonly now: Instant;
   }): Promise<IdempotencyClaim>;
-  /** Record the outcome of a claimed operation. The result is replayed to later claimants. */
+  /**
+   * Record the outcome of a claimed operation. The result is replayed to later claimants.
+   *
+   * Completing with an outcome equal to the record's current one is a no-op: a stolen lease can
+   * leave two attempts finishing the same operation, and the second `succeeded` must not be an
+   * error that the workflow would misread as a failed write.
+   */
   completeIdempotency(input: {
     readonly tenantId: TenantId;
     readonly key: string;
@@ -113,6 +124,23 @@ function refKey(tenantId: TenantId, channel: ChannelCode, externalOrderId: strin
 
 function cursorKey(tenantId: TenantId, channel: ChannelCode, entity: SyncEntity): string {
   return `${tenantId}\u0000${channel}\u0000${entity}`;
+}
+
+/**
+ * How long a claim is held before another attempt may steal it.
+ *
+ * Long enough that a slow-but-alive marketplace call is not preempted (a stolen lease can mean a
+ * second call), short enough that a crashed worker does not block that order for the rest of the
+ * day. Five minutes is an order of magnitude above any single channel call we make.
+ */
+export const DEFAULT_IDEMPOTENCY_LEASE_MS = 5 * 60 * 1000;
+
+function leaseDeadline(ttlMs: number | undefined, now: Instant): Instant {
+  const ttl = ttlMs ?? DEFAULT_IDEMPOTENCY_LEASE_MS;
+  if (!Number.isFinite(ttl) || ttl <= 0) {
+    throw new RangeError("Idempotency lease TTL must be a positive number of milliseconds.");
+  }
+  return new Date(new Date(now).getTime() + ttl).toISOString();
 }
 
 /**
@@ -209,6 +237,7 @@ export class InMemorySyncStateStore implements SyncStateStore {
     readonly key: string;
     readonly operation: string;
     readonly fingerprint: string;
+    readonly leaseTtlMs?: number;
     readonly now: Instant;
   }): Promise<IdempotencyClaim> {
     const mapKey = `${input.tenantId}\u0000${input.key}`;
@@ -222,7 +251,16 @@ export class InMemorySyncStateStore implements SyncStateStore {
           details: { key: input.key, operation: input.operation }
         });
       }
-      if (existing.outcome === "in_progress") return { kind: "in_flight", record: existing };
+      if (existing.outcome === "in_progress") {
+        // A lease whose holder died must be stealable, or a single crash would freeze this key
+        // forever and turn every retry into a skip.
+        if (existing.expiresAt !== null && existing.expiresAt <= input.now) {
+          const stolen = this.#reclaim(existing, input.leaseTtlMs, input.now);
+          this.#idempotency.set(mapKey, stolen);
+          return { kind: "claimed" };
+        }
+        return { kind: "in_flight", record: existing };
+      }
       return { kind: "replay", record: existing };
     }
 
@@ -233,6 +271,7 @@ export class InMemorySyncStateStore implements SyncStateStore {
       fingerprint: input.fingerprint,
       outcome: "in_progress",
       result: null,
+      expiresAt: leaseDeadline(input.leaseTtlMs, input.now),
       createdAt: input.now,
       updatedAt: input.now
     };
@@ -256,6 +295,13 @@ export class InMemorySyncStateStore implements SyncStateStore {
     }
     // A failed attempt may be retried, so `failed` can be reopened by a later claim. Only a
     // succeeded record is terminal, and this guard is what stops a success being overwritten.
+    if (existing.outcome === "succeeded" && input.outcome === "succeeded") {
+      // Two attempts can hold the same key when a lease was stolen from a slow (not dead) holder,
+      // and both can then succeed against an idempotent upstream. The second `succeeded` is the
+      // same fact restated, so it is accepted rather than reported as a conflict the workflow
+      // would misread as a failed write. A `failed` after a success is still rejected.
+      return existing;
+    }
     if (existing.outcome === "succeeded") {
       throw new PlatformError("CONFLICT", "This idempotency key already succeeded.", {
         details: { key: input.key }
@@ -265,6 +311,8 @@ export class InMemorySyncStateStore implements SyncStateStore {
       ...existing,
       outcome: input.outcome,
       result: input.result,
+      // A terminal record has no lease: there is nothing left to steal.
+      expiresAt: null,
       updatedAt: input.now
     };
     this.#idempotency.set(mapKey, updated);
@@ -273,6 +321,22 @@ export class InMemorySyncStateStore implements SyncStateStore {
 
   async getIdempotency(tenantId: TenantId, key: string): Promise<IdempotencyRecord | null> {
     return this.#idempotency.get(`${tenantId}\u0000${key}`) ?? null;
+  }
+
+  /**
+   * Take over an `in_progress` record whose lease has expired.
+   *
+   * The result is cleared because the failed holder may have left a partial one, and a replay must
+   * never hand a later caller a value nothing completed.
+   */
+  #reclaim(existing: IdempotencyRecord, ttlMs: number | undefined, now: Instant): IdempotencyRecord {
+    return {
+      ...existing,
+      outcome: "in_progress",
+      result: null,
+      expiresAt: leaseDeadline(ttlMs, now),
+      updatedAt: now
+    };
   }
 
   async upsertSkuMap(entry: ChannelSkuMap): Promise<ChannelSkuMap> {

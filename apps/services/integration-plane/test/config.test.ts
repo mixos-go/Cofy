@@ -93,3 +93,33 @@ test("the Shopee webhook URL defaults from the public base URL", () => {
   assert.equal(config.shopee.partnerId, 123456);
   assert.equal(config.shopee.webhookUrl, "https://integration.example.test/v1/channels/shopee/webhook");
 });
+
+test("rate budgets default to a conservative per-channel value rather than none", () => {
+  const config = loadConfig({ ...BASE_ENV });
+
+  // An empty budget map would block every channel; the default must be a real allowance.
+  assert.ok(config.rateBudgets.tiktok_tokopedia);
+  assert.ok(config.rateBudgets.shopee);
+});
+
+test("rate budgets are parsed from the environment when provided", () => {
+  const config = loadConfig({
+    ...BASE_ENV,
+    RATE_LIMIT_APP_BUDGETS: JSON.stringify({ shopee: { capacity: 50, refillPerSecond: 10 } })
+  });
+
+  assert.deepEqual(config.rateBudgets, { shopee: { capacity: 50, refillPerSecond: 10 } });
+});
+
+test("a malformed rate budget stops startup instead of silently using the default", () => {
+  // Falling back here would let a channel run on the wrong budget, which is the overspending the
+  // governor exists to prevent.
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, RATE_LIMIT_APP_BUDGETS: "not json" }),
+    (error: unknown) => error instanceof PlatformError && error.code === "VALIDATION_FAILED"
+  );
+  assert.throws(
+    () => loadConfig({ ...BASE_ENV, RATE_LIMIT_APP_BUDGETS: JSON.stringify({ shopee: { capacity: -1 } }) }),
+    (error: unknown) => error instanceof PlatformError && error.code === "VALIDATION_FAILED"
+  );
+});

@@ -11,6 +11,7 @@
 
 import type { ChannelConnector } from "@platform/channel-sdk";
 import type { ChannelCode } from "@platform/contracts";
+import type { RateLimitGovernor } from "@platform/rate-governor";
 import type { CredentialStore } from "@platform/secrets";
 import type { Logger } from "@platform/observability";
 import type { OAuthStateStore } from "./oauth-state.ts";
@@ -33,6 +34,12 @@ export interface IntegrationPlaneOptions {
   readonly oauthStates: OAuthStateStore;
   /** Bearer tokens the control plane and worker use to call this service (services never import). */
   readonly serviceTokens: readonly string[];
+  /**
+   * The shared rate-limit governor this plane enforces before every marketplace read/write
+   * (ADR 0002). It lives here rather than in the worker because this is the only service holding
+   * the app keys and the only one that ever calls a marketplace — one budget, one place to spend it.
+   */
+  readonly governor: RateLimitGovernor;
   readonly logger: Logger;
   readonly now?: () => Date;
 }

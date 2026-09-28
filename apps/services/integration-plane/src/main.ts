@@ -13,6 +13,7 @@
 
 import { CredentialStore, InMemorySecretStore } from "@platform/secrets";
 import type { SecretStore } from "@platform/secrets";
+import { RateLimitGovernor } from "@platform/rate-governor";
 import { createLogger } from "@platform/observability";
 import type { LogLevel } from "@platform/observability";
 import { TikTokConnector, defaultTikTokConfig } from "@platform/connector-tiktok-tokopedia";
@@ -58,6 +59,10 @@ async function main(): Promise<void> {
     publicBaseUrl: config.publicBaseUrl,
     oauthStates: new InMemoryOAuthStateStore(),
     serviceTokens: config.serviceTokens,
+    // One governor for the whole process, shared across tenants and channels: the marketplace
+    // limit is per app key and we own one app each (ADR 0002). In-memory is correct for a single
+    // instance; the Redis-backed state lands behind the same interface before scaling out.
+    governor: new RateLimitGovernor({ appBudgets: config.rateBudgets }),
     logger
   });
 

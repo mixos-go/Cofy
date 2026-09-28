@@ -13,7 +13,7 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { PlatformError, httpStatusFor } from "@platform/contracts";
+import { PlatformError, RateLimitedError, httpStatusFor } from "@platform/contracts";
 import type { ChannelCode } from "@platform/contracts";
 import type { ChannelConnector } from "@platform/channel-sdk";
 import { z } from "zod";
@@ -115,6 +115,53 @@ function channelParam(params: Readonly<Record<string, string>>): ChannelCode {
   return channel as ChannelCode;
 }
 
+/**
+ * Run one marketplace call under the shared governor (ADR 0002).
+ *
+ * The governor decides *when*, it does not sleep: a denial becomes a `RateLimitedError` the caller
+ * reschedules on, because blocking a request here would hold the connection and, with one budget
+ * shared by every tenant, make one slow caller everyone's problem. The worker reschedules; this
+ * plane only refuses.
+ *
+ * A `Retry-After` the marketplace sends overrides our accounting for the whole channel: the
+ * marketplace knows its own state and may be counting traffic the governor never saw, so every
+ * tenant waits rather than each retrying into the same wall.
+ */
+async function callChannel<T>(
+  options: IntegrationPlaneOptions,
+  channel: ChannelCode,
+  tenantId: string,
+  call: () => Promise<T>
+): Promise<T> {
+  const decision = options.governor.acquire({ tenantId, channel });
+  if (decision.kind === "reschedule") {
+    const retryAfterSeconds = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+    options.logger.info("channel.rate_limited", {
+      tenantId,
+      channel,
+      reason: decision.reason,
+      retryAfterSeconds
+    });
+    throw new RateLimitedError(
+      `Rate limit for ${channel}: ${decision.reason}.`,
+      retryAfterSeconds,
+      // `details` rides in the JSON error body, so the worker sees the retry hint even though it
+      // reconstructs the error from the body rather than the `Retry-After` header.
+      { reason: decision.reason, retryAfterSeconds }
+    );
+  }
+
+  try {
+    return await call();
+  } catch (error) {
+    // An authoritative rate-limit response from the channel pauses every tenant on this channel.
+    if (error instanceof RateLimitedError) {
+      options.governor.recordRateLimited(channel, error.retryAfterSeconds);
+    }
+    throw error;
+  }
+}
+
 export function createRoutes(
   options: IntegrationPlaneOptions,
   registry: ChannelRegistry
@@ -211,8 +258,11 @@ export function createRoutes(
         }
 
         // Walk one page from the real connector. This exercises the credential, signing, host and
-        // cursor path together; anything less would not prove the connection works.
-        const page = await connector.fetchOrders({ value: null }, stored);
+        // cursor path together; anything less would not prove the connection works. It spends
+        // budget like any other read, so it also goes through the governor.
+        const page = await callChannel(options, channel, tenantId, () =>
+          connector.fetchOrders({ value: null }, stored)
+        );
 
         return {
           tenantId,
@@ -234,7 +284,9 @@ export function createRoutes(
         await requireCapability(connector, "supportsOrderPull");
 
         const credential = await credentialFor(options, parsed.tenantId, channel);
-        const page = await connector.fetchOrders({ value: parsed.cursor }, credential);
+        const page = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.fetchOrders({ value: parsed.cursor }, credential)
+        );
         return { items: page.items, nextCursor: page.next.value };
       }
     },
@@ -249,7 +301,9 @@ export function createRoutes(
         await requireCapability(connector, "supportsListingRead");
 
         const credential = await credentialFor(options, parsed.tenantId, channel);
-        const page = await connector.fetchListings({ value: parsed.cursor }, credential);
+        const page = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.fetchListings({ value: parsed.cursor }, credential)
+        );
         return { items: page.items, nextCursor: page.next.value };
       }
     },
@@ -264,7 +318,9 @@ export function createRoutes(
         await requireCapability(connector, "supportsStockPush");
 
         const credential = await credentialFor(options, parsed.tenantId, channel);
-        const results = await connector.pushStock(parsed.items, credential);
+        const results = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.pushStock(parsed.items, credential)
+        );
         return { results };
       }
     }
@@ -368,11 +424,12 @@ async function handle(
   const url = new URL(request.url ?? "/", "http://localhost");
   const correlationId = `req_${Math.random().toString(36).slice(2, 10)}`;
 
-  const send = (status: number, payload: unknown): void => {
+  const send = (status: number, payload: unknown, headers: Record<string, string> = {}): void => {
     const body = JSON.stringify(payload);
     response.writeHead(status, {
       "content-type": "application/json",
-      "content-length": Buffer.byteLength(body)
+      "content-length": Buffer.byteLength(body),
+      ...headers
     });
     response.end(body);
   };
@@ -413,9 +470,19 @@ async function handle(
         code: error.code,
         errorMessage: error.message
       });
-      send(httpStatusFor(error.code), {
-        error: { code: error.code, message: error.message, details: error.details }
-      });
+      // A 429 must tell the caller when to come back; without `Retry-After`, every worker would
+      // retry on its own schedule and defeat the shared budget the governor just enforced.
+      const headers: Record<string, string> =
+        error instanceof RateLimitedError && error.retryAfterSeconds !== null
+          ? { "retry-after": String(error.retryAfterSeconds) }
+          : {};
+      send(
+        httpStatusFor(error.code),
+        {
+          error: { code: error.code, message: error.message, details: error.details }
+        },
+        headers
+      );
       return;
     }
 

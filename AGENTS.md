@@ -317,6 +317,18 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
 - **Node's strip-only TypeScript rejects parameter properties.** `constructor(private readonly x)`
   throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` under `node --test`. Use an explicit field
   assignment, matching §5.
+- **A service boundary that rebuilds an error from an HTTP status can silently drop retryability.**
+  The worker reconstructs a `PlatformError` from the integration plane's JSON body, where the only
+  other signal is the status number. Deriving `retryable` from `status >= 500` makes the governor's
+  `429 CHANNEL_RATE_LIMITED` terminal, so a throttled call is never retried. Derive it from the code
+  (`isRetryable(status, code)` in `packages/contracts`) and keep the retry hint (`Retry-After`) in
+  the error `details` as well as the header, because the caller may only read the body.
+- **An idempotency claim must be a lease, not a permanent flag.** A claim left `in_flight` by a
+  crashed attempt freezes that key forever: a later retry is skipped, not retried. Give the claim an
+  `expiresAt` while it is in progress, let a later caller steal it once the lease passes, and clear
+  the stolen partial result so a replay never returns a value no attempt completed. Completing an
+  already-terminal claim with the same outcome must be a no-op, not a conflict — a stolen lease can
+  leave two attempts finishing the same idempotent write.
 
 ---
 
