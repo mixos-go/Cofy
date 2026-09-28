@@ -25,7 +25,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | Not started | M3 |
+| M4 | Reconciliation & drift repair | Blocked on ADR 0013 approval (workflow engine choice) | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -484,8 +484,21 @@ boundary", not "shipped".
 
 **Goal.** The system repairs itself. A dropped webhook or a crashed worker becomes a non-event.
 
+**Status.** Blocked on one human decision before implementation: the workflow engine choice. M3
+built the workflows as plain functions over ports and deliberately did not pick an engine
+(AGENTS.md §2.5). M4's exit criteria ("kill the worker mid-reconciliation; restart resumes without
+duplicating effects") cannot be met without one. **ADR 0013** proposes keeping the workflows
+engine-agnostic behind a `WorkflowQueue` port with a Redis-backed (BullMQ) adapter, with the
+governor as the only component that decides delay. It is **Proposed, not accepted** — implementation
+does not start until it is approved.
+
 **Deliverables**
 
+- Durable sync-state store behind the existing `SyncStateStore` interface (Postgres), so an engine
+  that survives a restart has idempotency records that survive it too.
+- `WorkflowQueue` port + adapters (ADR 0013), wiring the M3 workflow functions as units.
+- Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After` — this
+  also closes M3's open item (a throttled call is recorded failed today and never re-run).
 - Cursor-based pull for orders and stock snapshots, per tenant per channel.
 - Drift detection: compare pulled state against local state, classify drift type.
 - Repair via the same idempotent workflows used by real-time paths (no second code path).
