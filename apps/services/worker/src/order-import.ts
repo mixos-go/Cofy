@@ -51,13 +51,30 @@ export interface OrderImportOutcome {
 
 const MAX_PAGES_PER_RUN = 100;
 
+export interface OrderImportInput {
+  readonly tenantId: TenantId;
+  readonly channel: ChannelCode;
+  /**
+   * Retry refs marked `failed` instead of treating them as terminal (ADR 0014).
+   *
+   * Off for the real-time path: a `failed` ref is a decision reconciliation owns, so a plain pull
+   * must not silently re-attempt a known-bad order and spend budget on it. On for a repair pass,
+   * which is the caller that *is* reconciliation — it retries the failure while it holds the order
+   * from the channel, which is what makes the retry safe: the ref is only reopened if the order is
+   * actually in the page, so a re-count after the pass can never read zero while the order is still
+   * missing.
+   */
+  readonly retryFailedRefs?: boolean;
+}
+
 export async function importOrdersOnce(
   context: WorkflowContext,
-  input: { readonly tenantId: TenantId; readonly channel: ChannelCode }
+  input: OrderImportInput
 ): Promise<OrderImportOutcome> {
   const { syncState, gateway, logger } = context;
   const tenantId = input.tenantId;
   const channel = input.channel;
+  const retryFailedRefs = input.retryFailedRefs ?? false;
 
   let cursor = await syncState.getCursor({ tenantId, channel, entity: "orders" });
   let imported = 0;
@@ -70,7 +87,7 @@ export async function importOrdersOnce(
     pages += 1;
 
     for (const order of batch.items) {
-      const result = await importOneOrder(context, { tenantId, channel, order });
+      const result = await importOneOrder(context, { tenantId, channel, order, retryFailedRefs });
       if (result === "imported") imported += 1;
       else if (result === "skipped") skipped += 1;
       else failed += 1;
@@ -97,7 +114,12 @@ type OneOrderResult = "imported" | "skipped" | "failed";
 
 async function importOneOrder(
   context: WorkflowContext,
-  input: { readonly tenantId: TenantId; readonly channel: ChannelCode; readonly order: ChannelOrder }
+  input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly order: ChannelOrder;
+    readonly retryFailedRefs: boolean;
+  }
 ): Promise<OneOrderResult> {
   const { syncState, commerce, events, logger } = context;
   const { tenantId, channel, order } = input;
@@ -113,8 +135,13 @@ async function importOneOrder(
     return "skipped";
   }
   if (reservation.kind === "exists" && reservation.ref.status === "failed") {
-    logger.warn("order.import.ref_failed", { tenantId, channel, externalOrderId: order.externalOrderId });
-    return "failed";
+    if (!input.retryFailedRefs) {
+      logger.warn("order.import.ref_failed", { tenantId, channel, externalOrderId: order.externalOrderId });
+      return "failed";
+    }
+    // A repair pass retries the failure. The reopen happens here, while the order is in hand, so a
+    // repair can never report drift resolved for an order it did not actually pull (ADR 0014).
+    await syncState.reopenOrderRef({ tenantId, channel, externalOrderId: order.externalOrderId });
   }
 
   try {

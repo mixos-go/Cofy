@@ -472,4 +472,79 @@ test("the API", async (t) => {
     });
     assert.equal(bad.status, 422);
   });
+
+  await t.test("the drift dashboard counts a failed ref and returns to zero after a repair", async () => {
+    const driftTenant = "tnt-drift";
+    const failedRef = async (): Promise<{ total: number; failedImport: number }> => {
+      const response = await fetch(`${harness.baseUrl}/v1/sync/drift/${driftTenant}/shopee`, {
+        headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+      });
+      assert.equal(response.status, 200);
+      return ((await response.json()) as { drift: { total: number; failedImport: number } }).drift;
+    };
+
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId: driftTenant, channel: "shopee", externalOrderId: "ext-drift" })
+    });
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/fail`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId: driftTenant, channel: "shopee", externalOrderId: "ext-drift" })
+    });
+    assert.equal((await failedRef()).total, 1);
+    assert.equal((await failedRef()).failedImport, 1);
+
+    // The worker's repair path reopens the ref, then re-imports it; the dashboard reads zero after.
+    const reopen = await fetch(`${harness.baseUrl}/v1/sync/order-refs/reopen`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId: driftTenant, channel: "shopee", externalOrderId: "ext-drift" })
+    });
+    assert.equal(reopen.status, 200);
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/commit`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({
+        tenantId: driftTenant,
+        channel: "shopee",
+        externalOrderId: "ext-drift",
+        orderId: "order-1"
+      })
+    });
+    assert.equal((await failedRef()).total, 0);
+    assert.equal((await failedRef()).failedImport, 0);
+  });
+
+  await t.test("the drift dashboard is scoped per tenant, so one tenant cannot read another's", async () => {
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId: "tnt-a-drift", channel: "shopee", externalOrderId: "ext-a" })
+    });
+    await fetch(`${harness.baseUrl}/v1/sync/order-refs/fail`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+      body: JSON.stringify({ tenantId: "tnt-a-drift", channel: "shopee", externalOrderId: "ext-a" })
+    });
+
+    const other = await fetch(`${harness.baseUrl}/v1/sync/drift/tnt-b-drift/shopee`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    const body = (await other.json()) as { drift: { total: number } };
+    assert.equal(body.drift.total, 0);
+  });
+
+  await t.test("a drift read without a service token is refused", async () => {
+    const response = await fetch(`${harness.baseUrl}/v1/sync/drift/${tenantId}/shopee`);
+    assert.equal(response.status, 401);
+  });
+
+  await t.test("an unknown status filter on the ref list is a validation failure", async () => {
+    const response = await fetch(`${harness.baseUrl}/v1/sync/order-refs/${tenantId}/shopee?status=bogus`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(response.status, 422);
+  });
 });

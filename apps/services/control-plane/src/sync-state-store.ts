@@ -22,6 +22,7 @@ import { PlatformError } from "@platform/contracts";
 import type {
   ChannelCode,
   ChannelOrderRef,
+  ChannelOrderRefStatus,
   ChannelSkuMap,
   IdempotencyClaim,
   IdempotencyOutcome,
@@ -367,6 +368,53 @@ export class PostgresSyncStateStore implements SyncStateStore {
     return row === undefined ? null : orderRefFromRow(row);
   }
 
+  async listOrderRefs(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly status?: ChannelOrderRefStatus;
+    readonly limit?: number;
+  }): Promise<readonly ChannelOrderRef[]> {
+    await this.#ensureSchema();
+    // `$3 is null or status = $3` keeps one statement for both the filtered and unfiltered read, so
+    // the two cannot drift. The order matches the in-memory store: oldest first, then by id, which
+    // makes a bounded repair pass deterministic.
+    const result = await this.#pool.query<OrderRefRow>(
+      `select * from ${this.#schema}.channel_order_refs
+        where tenant_id = $1 and channel = $2 and ($3::text is null or status = $3)
+        order by updated_at asc, external_order_id asc
+        limit $4`,
+      [input.tenantId, input.channel, input.status ?? null, input.limit ?? null]
+    );
+    return result.rows.map(orderRefFromRow);
+  }
+
+  async reopenOrderRef(
+    tenantId: TenantId,
+    channel: ChannelCode,
+    externalOrderId: string,
+    now: Instant
+  ): Promise<ChannelOrderRef> {
+    await this.#ensureSchema();
+    return this.#withTx(async (client) => {
+      const current = await this.#lockedOrderRef(client, tenantId, channel, externalOrderId);
+      if (current.status === "committed") {
+        throw new PlatformError("CONFLICT", "A committed order ref cannot be reopened.", {
+          details: { tenantId, channel, externalOrderId }
+        });
+      }
+      if (current.status === "reserved") return current;
+
+      const updated = await client.query<OrderRefRow>(
+        `update ${this.#schema}.channel_order_refs
+           set status = 'reserved', order_id = null, updated_at = $4
+         where tenant_id = $1 and channel = $2 and external_order_id = $3
+         returning *`,
+        [tenantId, channel, externalOrderId, now]
+      );
+      return orderRefFromRow(updated.rows[0]!);
+    });
+  }
+
   async claimIdempotency(input: {
     readonly tenantId: TenantId;
     readonly key: string;
@@ -436,6 +484,18 @@ export class PostgresSyncStateStore implements SyncStateStore {
         return { kind: "claimed" };
       }
       return { kind: "in_flight", record: existing };
+    }
+    if (existing.outcome === "failed") {
+      // A failed attempt is retryable, and reconciliation's repair depends on it: a replay here
+      // would report the operation as done while its recorded result is the failure, so the retry
+      // could never happen. Only `succeeded` is terminal (see `completeIdempotency`).
+      await client.query(
+        `update ${this.#schema}.idempotency_records
+           set outcome = 'in_progress', result = null, expires_at = $4, updated_at = $3
+         where tenant_id = $1 and key = $2`,
+        [existing.tenantId, existing.key, now, deadline]
+      );
+      return { kind: "claimed" };
     }
     return { kind: "replay", record: existing };
   }

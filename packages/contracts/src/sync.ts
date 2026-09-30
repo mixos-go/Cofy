@@ -100,3 +100,116 @@ export interface SyncCursorRecord {
   readonly cursor: string | null;
   readonly updatedAt: Instant;
 }
+
+/**
+ * How an order ref is drifting from reality (docs/adr/0014).
+ *
+ * Both kinds are read straight off the ref's own state rather than stored in a second table: the
+ * ref already records what happened, and a parallel drift row would be a second source of truth to
+ * keep in step. Drift is therefore *derived* — which also means it cannot itself drift.
+ *
+ * - `failed_import` — the ref is `failed`: the import was attempted and gave up. A known-bad order
+ *   that will never converge on its own.
+ * - `stale_reservation` — the ref is `reserved` past the point where the attempt holding it could
+ *   still be alive. This is ADR 0010's accepted "partial commit between the two stores": the
+ *   reservation exists, the Medusa order may or may not.
+ */
+export const DRIFT_KINDS = ["failed_import", "stale_reservation"] as const;
+
+export type DriftKind = (typeof DRIFT_KINDS)[number];
+
+/** One drifting order ref, with enough to repair it and to time the repair. */
+export interface DriftItem {
+  readonly tenantId: TenantId;
+  readonly channel: ChannelCode;
+  readonly externalOrderId: ExternalOrderId;
+  readonly kind: DriftKind;
+  /** When the ref last changed. Repair latency is measured from here. */
+  readonly since: Instant;
+}
+
+/**
+ * Unresolved drift for one target, as the dashboard shows it.
+ *
+ * `total` is the number the M4 exit criterion watches: it must return to zero after repair. It is
+ * counted rather than inferred from the items so a dashboard read does not have to materialise a
+ * tenant's whole backlog.
+ */
+export interface DriftSummary {
+  readonly tenantId: TenantId;
+  readonly channel: ChannelCode;
+  readonly failedImport: number;
+  readonly staleReservation: number;
+  readonly total: number;
+  /** When the count was taken, so a dashboard can show staleness of the reading itself. */
+  readonly observedAt: Instant;
+}
+
+/**
+ * A reservation older than this is drift: no attempt is still holding it.
+ *
+ * Well above the idempotency lease (`DEFAULT_IDEMPOTENCY_LEASE_MS`, five minutes) because the lease
+ * is what bounds a single attempt: once it has passed and the ref is still `reserved`, no live
+ * attempt can be mid-import, so the reservation is a partial commit between the two stores rather
+ * than work in progress. The gap above the lease leaves room for a slow-but-alive attempt.
+ */
+export const DEFAULT_STALE_RESERVATION_MS = 15 * 60 * 1000;
+
+/**
+ * Classify one order ref, or null when it is not drifting.
+ *
+ * Pure and shared so the worker's repair pass and the control plane's dashboard cannot disagree
+ * about what counts as drift: both call this over the same refs, with the same threshold.
+ */
+export function classifyOrderRefDrift(
+  ref: ChannelOrderRef,
+  input: { readonly now: Instant; readonly staleReservationMs: number }
+): DriftKind | null {
+  if (ref.status === "failed") return "failed_import";
+  if (ref.status === "committed") return null;
+  const age = new Date(input.now).getTime() - new Date(ref.updatedAt).getTime();
+  return age >= input.staleReservationMs ? "stale_reservation" : null;
+}
+
+/** Project refs into the drifting ones, preserving order. */
+export function orderRefsToDrift(
+  refs: readonly ChannelOrderRef[],
+  input: { readonly now: Instant; readonly staleReservationMs: number }
+): readonly DriftItem[] {
+  const items: DriftItem[] = [];
+  for (const ref of refs) {
+    const kind = classifyOrderRefDrift(ref, input);
+    if (kind === null) continue;
+    items.push({
+      tenantId: ref.tenantId,
+      channel: ref.channel,
+      externalOrderId: ref.externalOrderId,
+      kind,
+      since: ref.updatedAt
+    });
+  }
+  return items;
+}
+
+/** Count drifting refs into the shape a dashboard reads. Pure, so both planes agree on the totals. */
+export function summarizeDrift(input: {
+  readonly tenantId: TenantId;
+  readonly channel: ChannelCode;
+  readonly items: readonly DriftItem[];
+  readonly observedAt: Instant;
+}): DriftSummary {
+  let failedImport = 0;
+  let staleReservation = 0;
+  for (const item of input.items) {
+    if (item.kind === "failed_import") failedImport += 1;
+    else staleReservation += 1;
+  }
+  return {
+    tenantId: input.tenantId,
+    channel: input.channel,
+    failedImport,
+    staleReservation,
+    total: failedImport + staleReservation,
+    observedAt: input.observedAt
+  };
+}

@@ -19,8 +19,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { PlatformError, httpStatusFor } from "@platform/contracts";
-import type { Capability, ChannelCode, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
+import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS } from "@platform/contracts";
+import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
 import type { SessionManager } from "./identity.ts";
@@ -28,6 +28,7 @@ import { authorize } from "./identity.ts";
 import type { TenantRegistry } from "./tenants.ts";
 import type { ProvisioningOrchestrator } from "./provisioning.ts";
 import type { TenantTerminationService } from "./termination.ts";
+import { driftSummaryFor } from "./drift.ts";
 
 /** A route either requires a session, a service token, or is explicitly public. No default. */
 type AuthRequirement =
@@ -285,6 +286,59 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
     },
     {
       method: "POST",
+      path: "/v1/sync/order-refs/reopen",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncOrderRefBody.parse(body);
+        return options.syncState.reopenOrderRef(
+          parsed.tenantId,
+          channelFromBody(body),
+          parsed.externalOrderId,
+          new Date().toISOString()
+        );
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/sync/order-refs/:tenantId/:channel",
+      auth: { kind: "service" },
+      handler: async ({ params, request }) => {
+        const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+        const status = query.get("status");
+        const limit = query.get("limit");
+        return {
+          refs: await options.syncState.listOrderRefs({
+            tenantId: params.tenantId ?? "",
+            channel: channelParam(params),
+            status: status === null ? undefined : orderRefStatus(status),
+            limit: limit === null ? undefined : positiveInt(limit, "limit")
+          })
+        };
+      }
+    },
+    {
+      // The drift dashboard read (docs/PLAN.md M4). Same classifier and threshold as the worker's
+      // repair pass, so the number the dashboard shows is the number reconciliation acts on.
+      method: "GET",
+      path: "/v1/sync/drift/:tenantId/:channel",
+      auth: { kind: "service" },
+      handler: async ({ params, request }) => {
+        const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+        const raw = query.get("staleReservationSeconds");
+        const staleReservationMs =
+          raw === null ? DEFAULT_STALE_RESERVATION_MS : positiveInt(raw, "staleReservationSeconds") * 1_000;
+        return {
+          drift: await driftSummaryFor(options.syncState, {
+            tenantId: params.tenantId ?? "",
+            channel: channelParam(params),
+            staleReservationMs,
+            maxRefsPerPass: positiveInt(query.get("limit") ?? "500", "limit")
+          })
+        };
+      }
+    },
+    {
+      method: "POST",
       path: "/v1/sync/idempotency/claim",
       auth: { kind: "service" },
       handler: async ({ body }) => {
@@ -414,6 +468,23 @@ function channelParam(params: Readonly<Record<string, string>>): ChannelCode {
 
 function entityParam(params: Readonly<Record<string, string>>): SyncEntity {
   return entityFromBody({ entity: params.entity });
+}
+
+/** A ref status from an untrusted query string, rejected rather than defaulted. */
+function orderRefStatus(value: string): ChannelOrderRefStatus {
+  if (value !== "reserved" && value !== "committed" && value !== "failed") {
+    throw new PlatformError("VALIDATION_FAILED", "A known order ref status is required.", { details: { value } });
+  }
+  return value;
+}
+
+/** A positive integer query parameter. A NaN or `0` would silently change a limit's meaning. */
+function positiveInt(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new PlatformError("VALIDATION_FAILED", `${name} must be a positive integer.`, { details: { value } });
+  }
+  return parsed;
 }
 
 function matchPath(pattern: string, path: string): Record<string, string> | null {

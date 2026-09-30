@@ -33,6 +33,9 @@ export function syncStateClient(store: InMemorySyncStateStore): SyncStateClient 
     commitOrderRef: (input) =>
       store.commitOrderRef(input.tenantId, input.channel, input.externalOrderId, input.orderId, now()),
     failOrderRef: (input) => store.failOrderRef(input.tenantId, input.channel, input.externalOrderId, now()),
+    listOrderRefs: (input) => store.listOrderRefs(input),
+    reopenOrderRef: (input) =>
+      store.reopenOrderRef(input.tenantId, input.channel, input.externalOrderId, now()),
     claimIdempotency: (input) => store.claimIdempotency({ ...input, now: now() }),
     completeIdempotency: async (input) => {
       await store.completeIdempotency({
@@ -75,6 +78,11 @@ export class FakeChannelGateway implements ChannelGateway {
    * `fetchOrdersError` cannot do this: it fails the *first* read, before any page has committed.
    */
   fetchOrdersErrorAfterPages: number | null = null;
+  /**
+   * Every read *attempted*, including the one that throws. `orderFetches` records only successful
+   * reads, so a test that must observe the crashing read itself (a worker dying mid-pass) needs this.
+   */
+  orderFetchAttempts = 0;
   readonly orderFetches: { tenantId: TenantId; channel: ChannelCode; cursor: string | null }[] = [];
 
   withOrderPage(key: string, page: OrderPage): this {
@@ -92,6 +100,7 @@ export class FakeChannelGateway implements ChannelGateway {
     readonly channel: ChannelCode;
     readonly cursor: string | null;
   }): Promise<OrderPage> {
+    this.orderFetchAttempts += 1;
     if (this.fetchOrdersError !== null) {
       const error = this.fetchOrdersError;
       this.fetchOrdersError = null;

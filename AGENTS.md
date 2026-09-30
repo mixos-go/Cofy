@@ -358,6 +358,30 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   needs a logger declares a three-method interface locally — `Logger` from `@platform/observability`
   satisfies it structurally — rather than taking a dependency on the observability package, which
   the boundary checker rejects.
+- **Repair must reopen a failed ref *inside* the pull, not in a loop before it.** Reopening every
+  `failed` ref and then re-counting makes the drift number fall to zero for orders the channel's
+  current page no longer returns — the dashboard reads healthy while the order is still missing,
+  which is a worse failure than showing drift. Gate the reopen on the order being in hand
+  (`retryFailedRefs` in `importOrdersOnce`), so `remaining` can only reach zero for work the pull
+  actually did. The repair path is the same function the real-time path calls; the flag is the only
+  difference (ADR 0014).
+- **One classifier for drift, shared by the writer and the reader.** The worker's repair pass and the
+  control-plane dashboard both classify from the ref's own state (`classifyOrderRefDrift` in
+  `packages/contracts`), so the number an operator reads is the number reconciliation acts on. A
+  second copy of the rule — especially the stale cutoff — is how the two drift apart.
+- **A `reserved` ref is drift only once no attempt can still hold it.** The age cutoff must exceed the
+  idempotency lease, or a healthy in-flight import is reclassified as drift and repaired underneath
+  itself. Both are deployment inputs, so the constraint is documented rather than enforced in code.
+- **`repaired` is repair activity, not a drift delta.** A pass's imported count can exceed the drift
+  detected before it, because the same cursor walk also delivers new orders. Report `detected` and
+  `remaining` as the pair that describes drift; keep `repaired` for how much work the pass did.
+- **A service client and its route can disagree while every test stays green.** The worker's
+  `listOrderRefs` first addressed the target as a query string (`/v1/sync/order-refs?tenantId=…`)
+  while the control plane's route is path-addressed (`/v1/sync/order-refs/:tenantId/:channel`). Every
+  worker test stubbed `SyncStateClient`, and every control-plane test called the route directly, so
+  nothing exercised the seam — the mismatch would have surfaced as a 404 in production. When a client
+  gains a method, pin its URL in a test against a fake transport (`test/ports.test.ts`), and keep the
+  new client addressed like its siblings so the convention is the thing being copied.
 
 ---
 

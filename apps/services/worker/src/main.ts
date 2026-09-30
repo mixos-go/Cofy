@@ -74,6 +74,33 @@ function readReconciliationInterval(): number {
   return seconds;
 }
 
+/**
+ * How old an uncommitted order reservation must be before it counts as drift (ADR 0014).
+ *
+ * Required, like the cadence: it is a policy value (how long a partial commit may sit before we call
+ * it broken), and a default in code would be a decision nobody reviewed. It must exceed the
+ * idempotency lease, or a healthy in-flight attempt would be reclassified as drift.
+ */
+function readStaleReservationMs(): number {
+  const raw = process.env.STALE_RESERVATION_SECONDS;
+  const seconds = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error("STALE_RESERVATION_SECONDS must be a positive number of seconds.");
+  }
+  return seconds * 1_000;
+}
+
+/** Bound on refs one drift pass considers, so one tenant's backlog cannot eat a whole run. */
+function readMaxRefsPerPass(): number {
+  const raw = process.env.MAX_DRIFT_REFS_PER_PASS;
+  if (raw === undefined || raw === "") return 500;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("MAX_DRIFT_REFS_PER_PASS must be a positive integer.");
+  }
+  return value;
+}
+
 async function main(): Promise<void> {
   const logger = createLogger((process.env.LOG_LEVEL as LogLevel | undefined) ?? "info");
   // The per-tenant admin keys hand to the tenant-facing client (ADR 0012). The in-memory store is
@@ -119,7 +146,9 @@ async function main(): Promise<void> {
     events: new InMemoryEventPublisher(logger),
     logger,
     queue,
-    nextReconcileRunAt: (from) => scheduler.nextRunAt(from)
+    nextReconcileRunAt: (from) => scheduler.nextRunAt(from),
+    staleReservationMs: readStaleReservationMs(),
+    maxRefsPerPass: readMaxRefsPerPass()
   });
 
   const consumer = new BullMqWorkflowConsumer({

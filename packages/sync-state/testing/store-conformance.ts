@@ -112,6 +112,53 @@ export function runSyncStateStoreConformance(
     assert.equal(failed.orderId, null);
   });
 
+  test(`${label}: refs are listed per target, newest change last, and filterable by status`, async () => {
+    const state = await makeStore();
+    const later = new Date(new Date(NOW).getTime() + 60_000).toISOString();
+    await state.reserveOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "ext-1", now: NOW });
+    await state.reserveOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "ext-2", now: NOW });
+    await state.commitOrderRef("tnt-a", "shopee", "ext-2", "order-2", later);
+    await state.failOrderRef("tnt-a", "shopee", "ext-1", later);
+    // A second tenant's ref must never appear in the first tenant's list.
+    await state.reserveOrderRef({ tenantId: "tnt-b", channel: "shopee", externalOrderId: "ext-1", now: NOW });
+
+    const all = await state.listOrderRefs({ tenantId: "tnt-a", channel: "shopee" });
+    assert.deepEqual(
+      all.map((ref) => ref.externalOrderId).sort(),
+      ["ext-1", "ext-2"]
+    );
+    // Oldest change first, so a bounded repair pass works through the backlog in a stable order.
+    assert.deepEqual(all.map((ref) => ref.externalOrderId), ["ext-1", "ext-2"]);
+
+    const failed = await state.listOrderRefs({ tenantId: "tnt-a", channel: "shopee", status: "failed" });
+    assert.deepEqual(failed.map((ref) => ref.externalOrderId), ["ext-1"]);
+
+    const capped = await state.listOrderRefs({ tenantId: "tnt-a", channel: "shopee", limit: 1 });
+    assert.equal(capped.length, 1);
+    assert.equal(capped[0]?.externalOrderId, "ext-1");
+  });
+
+  test(`${label}: a failed ref is reopened for repair, a committed one is final`, async () => {
+    const state = await makeStore();
+    await state.reserveOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "ext-1", now: NOW });
+    await state.failOrderRef("tnt-a", "shopee", "ext-1", NOW);
+
+    const reopened = await state.reopenOrderRef("tnt-a", "shopee", "ext-1", NOW);
+    assert.equal(reopened.status, "reserved", "the import path can now retry the order");
+    assert.equal(reopened.orderId, null);
+
+    // Reopening an already-open ref is a no-op, so a redelivered repair pass does not error.
+    const again = await state.reopenOrderRef("tnt-a", "shopee", "ext-1", NOW);
+    assert.equal(again.status, "reserved");
+
+    // A committed ref must not be reopened: that would let a second Medusa order be created.
+    await state.commitOrderRef("tnt-a", "shopee", "ext-1", "order-1", NOW);
+    await assert.rejects(
+      () => state.reopenOrderRef("tnt-a", "shopee", "ext-1", NOW),
+      (error: unknown) => error instanceof PlatformError && error.code === "CONFLICT"
+    );
+  });
+
   test(`${label}: committing an unknown ref is not found`, async () => {
     const state = await makeStore();
     await assert.rejects(
@@ -189,6 +236,9 @@ export function runSyncStateStoreConformance(
     await state.claimIdempotency({ tenantId: "tnt-a", key: "k1", operation: "stock.push", fingerprint: "fp-1", now: NOW });
     await state.completeIdempotency({ tenantId: "tnt-a", key: "k1", outcome: "failed", result: null, now: NOW });
 
+    // A failed record is not a completed write, so a later attempt must be able to take the key and
+    // actually retry the operation. Reporting `replay` here would tell the caller the work is done
+    // while its recorded result is the failure, which is how drift becomes unrepairable (ADR 0014).
     const retry = await state.claimIdempotency({
       tenantId: "tnt-a",
       key: "k1",
@@ -196,7 +246,7 @@ export function runSyncStateStoreConformance(
       fingerprint: "fp-1",
       now: NOW
     });
-    assert.equal(retry.kind, "replay");
+    assert.equal(retry.kind, "claimed");
 
     await state.completeIdempotency({ tenantId: "tnt-a", key: "k1", outcome: "succeeded", result: null, now: NOW });
     await assert.rejects(

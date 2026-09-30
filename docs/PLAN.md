@@ -25,7 +25,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/metrics remain | M3 |
+| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/repair and dashboard done for order refs; stock snapshot pull, real-Redis restart test, retention remain | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -461,7 +461,7 @@ boundary", not "shipped".
 - Sync state is durable when `DATABASE_URL` is configured: the control plane now selects
   `PostgresSyncStateStore` (ADR 0010), and the in-memory store remains only as the
   no-infrastructure local default. Both implementations are held to one shared conformance suite
-  (`packages/sync-state/testing/store-conformance.ts`): 27 tests over the in-memory store, and the
+  (`packages/sync-state/testing/store-conformance.ts`): 29 tests over the in-memory store, and the
   same suite plus a table-level uniqueness check over a real Postgres
   (`apps/services/control-plane/test/integration/sync-state-store.test.ts`). Durable sync state is
   the prerequisite for M4's "kill the worker mid-reconciliation; restart resumes without
@@ -472,6 +472,13 @@ boundary", not "shipped".
   only repair path. The TTL is a guess, not a measurement: too short and a slow-but-alive call is
   preempted into a second call (safe only because the write is idempotent), too long and a crash
   blocks that order for the whole TTL. Measure against real call latencies before hardening it.
+- Drift is defined for order refs only (ADR 0014): a `failed` ref is `failed_import` and a
+  `reserved` ref past `STALE_RESERVATION_SECONDS` is `stale_reservation`. The cutoff must exceed the
+  idempotency lease or a healthy in-flight attempt is reclassified as drift — a relationship the
+  code documents but does not enforce, because both are deployment inputs. Detection reads at most
+  `MAX_DRIFT_REFS_PER_PASS` refs per kind per pass, so a tenant with more drift than the bound
+  converges over several passes. Stock drift is not covered yet, because the stock snapshot pull it
+  would need is still open.
 - The stock-push idempotency key is a digest of the pushed payload. That makes an unchanged re-push
   a replay and a changed value a new operation (both tested), but it also means two *different*
   channels' pushes are separate keys by construction, and a partially-rejected batch is recorded as
@@ -492,13 +499,15 @@ boundary", not "shipped".
 **Goal.** The system repairs itself. A dropped webhook or a crashed worker becomes a non-event.
 
 **Status.** In progress. ADR 0013 is accepted (the workflows stay engine-agnostic behind a
-`WorkflowQueue` port; the governor is the only component that decides delay). The durable sync-state
-store is done and verified against real Postgres, the `WorkflowQueue` port has both adapters —
-in-memory and Redis/BullMQ — passing one conformance suite, and the worker now runs the engine: the
-M3 workflow functions are registered as units, a `CHANNEL_RATE_LIMITED` is rescheduled with the
-governor's `Retry-After` (closing M3's open item), and `reconcile.orders` converges through the same
-pull path on a cadence that lives in the queue. What remains is drift *classification* and its
-metrics, plus a real-Redis restart test.
+`WorkflowQueue` port; the governor is the only component that decides delay), and ADR 0014 is
+accepted (drift is classified by one shared pure function and repaired through the ordinary pull).
+The durable sync-state store is done and verified against real Postgres, the `WorkflowQueue` port has
+both adapters — in-memory and Redis/BullMQ — passing one conformance suite, and the worker now runs
+the engine: the M3 workflow functions are registered as units, a `CHANNEL_RATE_LIMITED` is rescheduled
+with the governor's `Retry-After` (closing M3's open item), and `reconcile.orders` converges through
+the same pull path on a cadence that lives in the queue. Drift detection, classification and repair
+are now wired (order refs), with the control-plane dashboard read; what remains is the stock snapshot
+pull, a real-Redis restart test, and retention.
 
 **Deliverables**
 
@@ -531,10 +540,28 @@ metrics, plus a real-Redis restart test.
   the cadence survives a restart instead of living in a timer (AGENTS.md §2.5). *(Done: the unit calls
   the same `importOrdersOnce` as the real-time path — no second repair code path (ADR 0002). Evidence:
   `apps/services/worker/test/reconcile.test.ts` and the `reconcile.orders` case in `units.test.ts`.)*
-- [ ] Drift detection: compare pulled state against local state, classify drift type.
-- [ ] Repair via the same idempotent workflows used by real-time paths (no second code path).
-- [ ] Cursor advance only after successful commit; safe re-run.
-- [ ] Drift metrics and alerting: drift rate, repair latency, unresolved drift count.
+- **[x] Drift detection: compare pulled state against local state, classify drift type.** *(Done:
+  `classifyOrderRefDrift` / `orderRefsToDrift` in `packages/contracts` classify a ref as
+  `failed_import` or `stale_reservation` from its own state, shared by the worker's pass and the
+  control-plane dashboard so they cannot disagree (ADR 0014). The stale cutoff is an operator input.
+  Evidence: `apps/services/worker/test/drift.test.ts` — a failed ref is drift, an old reservation is
+  drift, a fresh one is not, and a committed ref never is.)*
+- **[x] Repair via the same idempotent workflows used by real-time paths (no second code path).**
+  *(Done: `repairDrift` calls the same `importOrdersOnce` the real-time unit calls, with
+  `retryFailedRefs` set; a `failed` ref is reopened inside the pull while the order is in hand, so a
+  repair can never report drift resolved for an order it did not pull. Evidence:
+  `apps/services/worker/test/drift.test.ts` — a repair re-imports the order and the re-count is zero,
+  a repair that fails again leaves the drift visible, and a ref is not reopened for an order the page
+  no longer returns.)*
+- **[x] Cursor advance only after successful commit; safe re-run.** *(Already held: the pull advances
+  the cursor after the whole page committed and the ref/idempotency checks make a re-read a no-op —
+  proven by the crash-mid-pass test in `apps/services/worker/test/integration/restart.test.ts`.)*
+- **[x] Drift metrics and alerting: drift rate, repair latency, unresolved drift count.** *(Done for
+  the M4 surface: the control plane exposes `GET /v1/sync/drift/:tenantId/:channel` returning the
+  `DriftSummary` (unresolved count by kind), and the repair pass emits `drift.repair.completed` with
+  `detected`/`repaired`/`remaining` through the platform's structured JSON logs. A dedicated metrics
+  stack is deliberately not added (ADR 0014). Evidence: the drift-dashboard cases in
+  `apps/services/control-plane/test/http.test.ts`.)*
 - [ ] Retention policy for raw events and idempotency records.
 - [ ] A real-Redis integration test that kills the worker mid-pass and proves the restart resumes
       without duplicating effects (the queue's durability is proven; the resume-through-a-pass is not).
@@ -547,14 +574,20 @@ metrics, plus a real-Redis restart test.
 - [~] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
       are not required, so this is the normal case today, not a degraded mode). *Orders converge
       today; the stock snapshot pull is still open, so this is partial.*
-- [ ] Injected drift (delete a local order, corrupt a stock level) is detected and repaired.
+- [~] Injected drift (delete a local order, corrupt a stock level) is detected and repaired. *Order
+      drift is covered end to end: a failed or stale ref is classified, repaired through the pull, and
+      the re-count returns to zero (`apps/services/worker/test/drift.test.ts`). Stock drift is not yet
+      covered, because the stock snapshot pull it needs is still open.*
 - [x] Reconciliation respects the rate-limit budget and never starves real-time operations. *(A
       refusal defers the unit with the governor's `Retry-After` instead of failing it, and the queue
       carries no second limiter, so there is one budget — ADR 0013.)*
 - [~] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects. *The
       durable queue and the idempotency lease are in place and unit-tested; the end-to-end restart
       test on real Redis is still open.*
-- [ ] Drift dashboard shows unresolved drift returning to zero after repair.
+- [x] Drift dashboard shows unresolved drift returning to zero after repair. *(The control plane's
+      `GET /v1/sync/drift/:tenantId/:channel` reads the shared classifier over the durable store; the
+      HTTP test takes a failed ref from one count to zero after the reopen-and-commit repair path
+      (ADR 0014).)*
 
 **Non-goals**
 

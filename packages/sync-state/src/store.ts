@@ -71,6 +71,40 @@ export interface SyncStateStore {
   ): Promise<ChannelOrderRef | null>;
 
   /**
+   * Every order ref for one target, optionally narrowed to one status (ADR 0014).
+   *
+   * Drift is derived from these refs rather than stored beside them, so this is the read the
+   * detector and the dashboard both use. `limit` bounds a repair pass, so one tenant's backlog
+   * cannot consume a whole reconciliation run's budget.
+   */
+  listOrderRefs(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly status?: ChannelOrderRefStatus;
+    readonly limit?: number;
+  }): Promise<readonly ChannelOrderRef[]>;
+
+  /**
+   * Return a `failed` ref to `reserved`, so the import can be retried (ADR 0014's repair).
+   *
+   * Only a `failed` ref is reopened, and only a repair pass calls this — and only while holding the
+   * order from the channel. A `committed` ref is final: reopening one would let a second Medusa
+   * order be created for an order that already exists, which is the failure the ref exists to
+   * prevent. A `reserved` ref is already open and is returned unchanged, so a redelivered repair is
+   * a no-op rather than an error.
+   *
+   * Reopening instead of deleting is deliberate: a deleted ref is indistinguishable from one never
+   * seen, so drift could vanish without the order ever being imported. Reopening keeps the record,
+   * so an import that fails again is visible again.
+   */
+  reopenOrderRef(
+    tenantId: TenantId,
+    channel: ChannelCode,
+    externalOrderId: string,
+    now: Instant
+  ): Promise<ChannelOrderRef>;
+
+  /**
    * Claim an idempotency key before an outbound write (AGENTS.md §2.4). Returns `replay` when the
    * operation already succeeded, `in_flight` when another attempt holds the key, and `claimed`
    * when this caller now owns it.
@@ -78,6 +112,10 @@ export interface SyncStateStore {
    * A claim is a *lease*: if the holder dies, `expiresAt` passes and the next caller steals the
    * key and proceeds. Without that, one crash would make every later retry a skip and only
    * reconciliation could repair it.
+   *
+   * A `failed` record is retryable, not terminal: a claim on one returns `claimed` and reopens it,
+   * because reporting `replay` would tell the caller the write is done while the recorded result is
+   * the failure. Only `succeeded` replays.
    */
   claimIdempotency(input: {
     readonly tenantId: TenantId;
@@ -256,6 +294,52 @@ export class InMemorySyncStateStore implements SyncStateStore {
     return this.#refs.get(refKey(tenantId, channel, externalOrderId)) ?? null;
   }
 
+  async listOrderRefs(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly status?: ChannelOrderRefStatus;
+    readonly limit?: number;
+  }): Promise<readonly ChannelOrderRef[]> {
+    const prefix = `${input.tenantId}\u0000${input.channel}\u0000`;
+    const matches = [...this.#refs.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, ref]) => ref)
+      .filter((ref) => input.status === undefined || ref.status === input.status)
+      // Ordered by `updatedAt` then id so a bounded pass is deterministic: the oldest drift is
+      // repaired first, and two runs of the same pass see the same window.
+      .sort((a, b) =>
+        a.updatedAt === b.updatedAt
+          ? a.externalOrderId.localeCompare(b.externalOrderId)
+          : a.updatedAt.localeCompare(b.updatedAt)
+      );
+    return input.limit === undefined ? matches : matches.slice(0, input.limit);
+  }
+
+  async reopenOrderRef(
+    tenantId: TenantId,
+    channel: ChannelCode,
+    externalOrderId: string,
+    now: Instant
+  ): Promise<ChannelOrderRef> {
+    const key = refKey(tenantId, channel, externalOrderId);
+    const existing = this.#refs.get(key);
+    if (existing === undefined) {
+      throw new PlatformError("NOT_FOUND", "No order ref to reopen.", {
+        details: { tenantId, channel, externalOrderId }
+      });
+    }
+    if (existing.status === "committed") {
+      throw new PlatformError("CONFLICT", "A committed order ref cannot be reopened.", {
+        details: { tenantId, channel, externalOrderId }
+      });
+    }
+    if (existing.status === "reserved") return existing;
+
+    const reopened: ChannelOrderRef = { ...existing, status: "reserved", orderId: null, updatedAt: now };
+    this.#refs.set(key, reopened);
+    return reopened;
+  }
+
   async claimIdempotency(input: {
     readonly tenantId: TenantId;
     readonly key: string;
@@ -284,6 +368,14 @@ export class InMemorySyncStateStore implements SyncStateStore {
           return { kind: "claimed" };
         }
         return { kind: "in_flight", record: existing };
+      }
+      if (existing.outcome === "failed") {
+        // A failed attempt is retryable, and reconciliation's repair depends on it: a replay here
+        // would report the operation as done while its recorded result is the failure, so the retry
+        // could never happen. Only `succeeded` is terminal (see `completeIdempotency`).
+        const retry = this.#reclaim(existing, input.leaseTtlMs, input.now);
+        this.#idempotency.set(mapKey, retry);
+        return { kind: "claimed" };
       }
       return { kind: "replay", record: existing };
     }

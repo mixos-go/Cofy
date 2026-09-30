@@ -74,6 +74,8 @@ function harness() {
     logger: silent,
     queue,
     nextReconcileRunAt: (from) => new Date(from.getTime() + 60_000).toISOString(),
+    staleReservationMs: 15 * 60 * 1000,
+    maxRefsPerPass: 500,
     now: () => NOW
   });
   return { store, gateway, commerce, events, queue, handlers };

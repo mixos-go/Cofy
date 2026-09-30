@@ -34,6 +34,7 @@ import { importListingsOnce } from "./listing-import.ts";
 import { importOrdersOnce } from "./order-import.ts";
 import type { EventPublisher } from "./order-import.ts";
 import { pushStockOnce } from "./stock-push.ts";
+import { repairDrift } from "./drift.ts";
 import { deferralFor } from "./rate-limit.ts";
 import { reArmedJobId } from "./reconcile.ts";
 import type { ChannelGateway, CommerceClient, SyncStateClient } from "./ports.ts";
@@ -49,6 +50,10 @@ export interface WorkflowDependencies {
   readonly queue: WorkflowQueue;
   /** When a reconciliation pass that just finished should next run. Owned by the scheduler. */
   readonly nextReconcileRunAt: (from: Date) => string;
+  /** A reservation older than this is drift (ADR 0014). Owned by the operator, like the cadence. */
+  readonly staleReservationMs: number;
+  /** Bounds how many refs one drift detection or repair pass considers. */
+  readonly maxRefsPerPass: number;
   readonly now?: () => Date;
 }
 
@@ -126,7 +131,17 @@ async function runUnit(
 }
 
 export function createWorkflowHandlers(dependencies: WorkflowDependencies): WorkflowHandlerTable {
-  const { syncState, gateway, commerce, events, logger, queue, nextReconcileRunAt } = dependencies;
+  const {
+    syncState,
+    gateway,
+    commerce,
+    events,
+    logger,
+    queue,
+    nextReconcileRunAt,
+    staleReservationMs,
+    maxRefsPerPass
+  } = dependencies;
   const now = dependencies.now ?? ((): Date => new Date());
 
   return {
@@ -171,16 +186,18 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
       });
     },
 
-    // Scheduled convergence (docs/PLAN.md M4). Deliberately the *same* function the real-time unit
-    // calls, so repair and real-time import cannot drift into two behaviours (ADR 0002, ADR 0013).
-    // A pull is idempotent through the order refs, so re-running it on a schedule converges orders
-    // rather than duplicating them.
+    // Scheduled convergence and drift repair (docs/PLAN.md M4). Deliberately the *same* function the
+    // real-time unit calls — `importOrdersOnce` — so repair and real-time import cannot drift into
+    // two behaviours (ADR 0002, ADR 0013). The only difference is `retryFailedRefs`, which the
+    // scheduled pass sets so a ref a compensation marked `failed` is retried instead of skipped
+    // forever (ADR 0014). A pull is idempotent through the order refs, so re-running it converges
+    // rather than duplicating.
     "reconcile.orders": async (job): Promise<WorkflowRunResult> => {
       const channel = requireChannel(job);
       const result = await runUnit(job, logger, now, async () => {
         emptyPayload.parse(job.payload);
-        const outcome = await importOrdersOnce(
-          { syncState, gateway, commerce, events, logger, now },
+        const outcome = await repairDrift(
+          { syncState, gateway, commerce, events, logger, staleReservationMs, maxRefsPerPass, now },
           { tenantId: job.tenantId, channel }
         );
         logger.info("unit.reconcile.orders.completed", { tenantId: job.tenantId, channel, ...outcome });

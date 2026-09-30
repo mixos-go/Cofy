@@ -25,7 +25,8 @@ import type {
   SyncEntity,
   TenantId,
   ChannelSkuMap,
-  ChannelOrderRef
+  ChannelOrderRef,
+  ChannelOrderRefStatus
 } from "@platform/contracts";
 
 /** Platform-owned sync state (ADR 0010). Backed by the control-plane registry. */
@@ -42,6 +43,29 @@ export interface SyncStateClient {
     readonly orderId: OrderId;
   }): Promise<ChannelOrderRef>;
   failOrderRef(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ChannelOrderRef>;
+
+  /**
+   * Every order ref for one target, optionally narrowed to one status (ADR 0014).
+   *
+   * Drift is derived from these refs rather than stored beside them, so this is the read the drift
+   * detector and the dashboard both use.
+   */
+  listOrderRefs(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly status?: ChannelOrderRefStatus;
+    readonly limit?: number;
+  }): Promise<readonly ChannelOrderRef[]>;
+
+  /**
+   * Return a `failed` ref to `reserved`, so the import path retries the order (ADR 0014's repair).
+   * A `committed` ref is final and is refused.
+   */
+  reopenOrderRef(input: {
     readonly tenantId: TenantId;
     readonly channel: ChannelCode;
     readonly externalOrderId: string;
@@ -238,17 +262,17 @@ export class HttpSyncStateClient implements SyncStateClient {
     });
   }
 
+  #get(path: string): Promise<unknown> {
+    const transport = this.#options.transport ?? fetch;
+    return request(transport, `${this.#options.baseUrl}${path}`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.#options.serviceToken}` }
+    });
+  }
+
   /** Read a tenant's engine location (ADR 0012). Never returns the credential. */
   async getMedusaTarget(tenantId: TenantId): Promise<unknown> {
-    const transport = this.#options.transport ?? fetch;
-    return request(
-      transport,
-      `${this.#options.baseUrl}/v1/tenants/${encodeURIComponent(tenantId)}/medusa-target`,
-      {
-        method: "GET",
-        headers: { authorization: `Bearer ${this.#options.serviceToken}` }
-      }
-    );
+    return this.#get(`/v1/tenants/${encodeURIComponent(tenantId)}/medusa-target`);
   }
 
   async reserveOrderRef(input: {
@@ -277,6 +301,31 @@ export class HttpSyncStateClient implements SyncStateClient {
     readonly externalOrderId: string;
   }) {
     return (await this.#post("/v1/sync/order-refs/fail", input)) as ChannelOrderRef;
+  }
+
+  async listOrderRefs(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly status?: ChannelOrderRefStatus;
+    readonly limit?: number;
+  }) {
+    // Path-addressed like the other per-target reads (sku-maps, cursors): the target is part of the
+    // resource, and only the filters travel as a query.
+    const query = new URLSearchParams();
+    if (input.status !== undefined) query.set("status", input.status);
+    if (input.limit !== undefined) query.set("limit", String(input.limit));
+    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+    const path = `/v1/sync/order-refs/${encodeURIComponent(input.tenantId)}/${input.channel}${suffix}`;
+    const body = (await this.#get(path)) as { readonly refs: readonly ChannelOrderRef[] };
+    return body.refs;
+  }
+
+  async reopenOrderRef(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }) {
+    return (await this.#post("/v1/sync/order-refs/reopen", input)) as ChannelOrderRef;
   }
 
   async claimIdempotency(input: {

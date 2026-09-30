@@ -92,6 +92,8 @@ Owns *executing work over time*.
 - Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
 - Runs the reconciliation scheduler: it seeds the first `reconcile.orders` pass per target and the
   unit re-arms its own next run, so the cadence lives in the queue and survives a restart.
+- Runs drift detection and repair (`src/drift.ts`): `reconcile.orders` classifies order refs, repairs
+  through the ordinary pull, and logs the unresolved count (ADR 0014).
 - Owns the workflow engine connection. *(The process starts the BullMQ consumer and requires
   `WORKFLOW_ENGINE_REDIS_URL`: no sync work runs without the engine, per AGENTS.md §2.5, so a worker
   that cannot reach Redis refuses to start rather than degrade to a timer.)*
@@ -215,6 +217,15 @@ Repair reuses the exact workflows above rather than a second implementation: lis
 the SKU→variant map, order import re-reads its cursor window and dedups on the order ref, and stock
 push replays or re-pushes through the payload-keyed idempotency record. A repair path that differed
 from the live path would be a second place to get idempotency wrong.
+
+For order refs, drift is classified by one shared pure function (`classifyOrderRefDrift` /
+`orderRefsToDrift` in `packages/contracts`, ADR 0014): a `failed` ref is `failed_import`, a
+`reserved` ref past the operator's stale cutoff is `stale_reservation`, and a `committed` ref is
+never drift. The worker's repair pass (`src/drift.ts`) detects, runs `importOrdersOnce` with
+`retryFailedRefs` — the same pull the real-time path uses — and re-counts, so unresolved drift
+returns to zero only for orders the pull actually had. The control plane exposes the same count to
+the dashboard at `GET /v1/sync/drift/:tenantId/:channel`, so the number an operator reads is the
+number reconciliation acts on. Stock drift is not yet covered: the stock snapshot pull is open.
 
 ## 4. Tenant isolation
 
