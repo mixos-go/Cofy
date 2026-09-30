@@ -19,7 +19,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, asChannelCode } from "@platform/contracts";
+import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, CHANNEL_CODES, asChannelCode } from "@platform/contracts";
 import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
@@ -28,7 +28,7 @@ import { authorize } from "./identity.ts";
 import type { TenantRegistry } from "./tenants.ts";
 import type { ProvisioningOrchestrator } from "./provisioning.ts";
 import type { TenantTerminationService } from "./termination.ts";
-import { driftSummaryFor } from "./drift.ts";
+import { driftFor, driftSummaryFor, explainDrift } from "./drift.ts";
 
 /** A route either requires a session, a service token, or is explicitly public. No default. */
 type AuthRequirement =
@@ -313,6 +313,63 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
             status: status === null ? undefined : orderRefStatus(status),
             limit: limit === null ? undefined : positiveInt(limit, "limit")
           })
+        };
+      }
+    },
+    {
+      // The seller-facing sync health read (docs/PLAN.md M5: "failed syncs are visible with an
+      // actionable explanation"). It reads only platform-owned sync state, so it needs no ADR: no
+      // tenant commerce data is touched and no credential leaves this process.
+      //
+      // `tenant:read` is the capability because this is a read of the caller's own tenant, which is
+      // exactly what `seller_viewer` already holds — a viewer can see that something is stuck without
+      // being able to act on it. The tenant comes from the session (`scope: "self"`), never from a
+      // path or query, so a seller cannot ask about another tenant by editing a URL.
+      method: "GET",
+      path: "/v1/sync/health",
+      auth: { kind: "session", capability: "tenant:read", scope: "self" },
+      handler: async ({ tenantId, request }) => {
+        if (tenantId === null) {
+          // An operator has no tenant of its own. The ops view is a different, audited surface that
+          // names its target explicitly; this one must not guess a tenant for it.
+          throw new PlatformError("FORBIDDEN", "Sync health is read for one tenant, and an operator has none.", {
+            details: { hint: "Use the operator drift surface, which names its tenant." }
+          });
+        }
+
+        const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+        const raw = query.get("staleReservationSeconds");
+        const staleReservationMs =
+          raw === null ? DEFAULT_STALE_RESERVATION_MS : positiveInt(raw, "staleReservationSeconds") * 1_000;
+        const maxRefsPerPass = positiveInt(query.get("limit") ?? "100", "limit");
+
+        const channels = await Promise.all(
+          CHANNEL_CODES.map(async (channel) => {
+            const { summary, items } = await driftFor(options.syncState, {
+              tenantId,
+              channel,
+              staleReservationMs,
+              maxRefsPerPass
+            });
+            return {
+              channel,
+              unresolved: summary.total,
+              observedAt: summary.observedAt,
+              problems: items.map((item) => ({
+                externalOrderId: item.externalOrderId,
+                kind: item.kind,
+                since: item.since,
+                explanation: explainDrift(item.kind)
+              }))
+            };
+          })
+        );
+
+        return {
+          tenantId,
+          // One entry per known channel, including healthy ones, so the UI can show "connected and
+          // clear" without inferring absence.
+          channels
         };
       }
     },

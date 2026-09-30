@@ -309,6 +309,79 @@ test("the API", async (t) => {
     assert.equal(write.status, 403, "a viewer may not write");
   });
 
+  await t.test("sync health is scoped to the caller's tenant and explains a failure without a raw error", async () => {
+    // Seed a failed ref for the seller's own tenant and one for a different tenant. The seller must
+    // see only its own, which is the isolation the M5 criterion asks for on a *new* route — the
+    // tenant comes from the session, so there is no id to tamper with.
+    const otherTenant = (await harness.store.listTenants()).find((entry) => entry.id !== tenantId);
+    assert.ok(otherTenant, "expected a second tenant");
+
+    const seed = async (target: string, externalOrderId: string): Promise<void> => {
+      await fetch(`${harness.baseUrl}/v1/sync/order-refs/reserve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+        body: JSON.stringify({ tenantId: target, channel: "shopee", externalOrderId })
+      });
+      await fetch(`${harness.baseUrl}/v1/sync/order-refs/fail`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+        body: JSON.stringify({ tenantId: target, channel: "shopee", externalOrderId })
+      });
+    };
+    await seed(tenantId, "ext-mine");
+    await seed(otherTenant.id, "ext-theirs");
+
+    const response = await fetch(`${harness.baseUrl}/v1/sync/health`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      tenantId: string;
+      channels: {
+        channel: string;
+        unresolved: number;
+        problems: { externalOrderId: string; kind: string; explanation: string }[];
+      }[];
+    };
+
+    assert.equal(body.tenantId, tenantId);
+    // Every known channel is present, healthy ones included, so the UI never infers absence.
+    assert.deepEqual(
+      body.channels.map((entry) => entry.channel).sort(),
+      ["lazada", "shopee", "tiktok_tokopedia"]
+    );
+
+    const shopee = body.channels.find((entry) => entry.channel === "shopee");
+    assert.equal(shopee?.unresolved, 1, "only the seller's own drift is counted");
+    assert.deepEqual(shopee?.problems.map((problem) => problem.externalOrderId), ["ext-mine"]);
+    assert.equal(shopee?.problems[0]?.kind, "failed_import");
+    // An actionable sentence, not a code. The exact wording may change; that it is prose and names
+    // the class of failure is the property under test.
+    const explanation = shopee?.problems[0]?.explanation ?? "";
+    assert.ok(explanation.length > 40, "the explanation is a sentence, not an error code");
+    assert.ok(!explanation.includes("failed_import"), "the explanation does not leak the internal kind");
+
+    const clear = body.channels.find((entry) => entry.channel === "lazada");
+    assert.equal(clear?.unresolved, 0);
+    assert.deepEqual(clear?.problems, []);
+  });
+
+  await t.test("sync health refuses an operator, which has no tenant of its own", async () => {
+    // The seller route is tenant-scoped by construction. An operator reading a named tenant is the
+    // ops console's job, and that surface must be audited separately (M5) rather than reusing this.
+    const response = await fetch(`${harness.baseUrl}/v1/sync/health`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    assert.equal(response.status, 403);
+  });
+
+  await t.test("sync health requires a session, so a service token does not open it", async () => {
+    const response = await fetch(`${harness.baseUrl}/v1/sync/health`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(response.status, 401);
+  });
+
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {
     const response = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}`, {
       method: "DELETE",
