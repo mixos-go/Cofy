@@ -449,4 +449,11 @@ it. Same rule as §9/§10. Full rationale: `docs/adr/0011`.
   no-op.** `workflow_execution` stays empty and a repeated request re-executes the workflow. The
   `channel_order_link` unique index is therefore the real idempotency barrier, not workflow
   transaction resume; do not document resume behavior the configured engine does not provide.
-
+- **`@medusajs/medusa` declares no `bin` and does not depend on `@medusajs/cli`, so a clean
+  install creates no `medusa` binary.** It appeared locally only because an earlier install had
+  hoisted the CLI; CI's `pnpm install --frozen-lockfile` never did, so the real-CLI migration test
+  failed with `spawn .../.bin/medusa ENOENT` and every downstream assertion failed with
+  `relation "channel_order_link" does not exist`. The CLI is reached through a peer of
+  `@medusajs/framework`, which pnpm does not link as an executable. Pin `@medusajs/cli` as an
+  explicit devDependency of `medusa-config`; a test that invokes a binary by path must have that
+  binary as a direct dependency, or it passes on a warm developer tree and fails on a cold one.

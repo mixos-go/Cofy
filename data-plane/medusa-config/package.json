@@ -15,6 +15,7 @@
     "@medusajs/framework": "2.21.1"
   },
   "devDependencies": {
+    "@medusajs/cli": "2.21.1",
     "@medusajs/medusa": "2.21.1",
     "@medusajs/order": "2.21.1",
     "@medusajs/test-utils": "2.21.1",
