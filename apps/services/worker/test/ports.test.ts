@@ -10,7 +10,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PlatformError } from "@platform/contracts";
-import { HttpChannelGateway, HttpSyncStateClient } from "../src/ports.ts";
+import { HttpChannelGateway, HttpCommerceClient, HttpSyncStateClient } from "../src/ports.ts";
+import type { Transport } from "../src/ports.ts";
 
 /** A fetch that returns one canned error response, so the mapping is the only thing under test. */
 function errorTransport(status: number, code: string): typeof fetch {
@@ -110,4 +111,75 @@ test("reopenOrderRef posts to the reopen route", async () => {
   await client.reopenOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "o-1" });
 
   assert.equal(seen[0], "https://planes.example.test/v1/sync/order-refs/reopen");
+});
+
+/**
+ * The stock-snapshot and capability hops (docs/adr/0015).
+ *
+ * These three paths are the seam where a capability check and the walk it guards can drift apart: if
+ * the worker asked a route the plane does not serve, arming would silently fall back to "no channel
+ * can report stock" and stock drift would never be detected. Pinning the paths here is what keeps
+ * that from being a silent degradation.
+ */
+function transportSeen(body: unknown, seen: { url: string; method: string }[]): Transport {
+  return async (url, init) => {
+    seen.push({ url, method: init.method ?? "GET" });
+    return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) };
+  };
+}
+
+/** The same recorder shaped as `fetch`, which is what the gateway takes (it passes a full RequestInit). */
+function fetchSeen(body: unknown, seen: { url: string; method: string }[]): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    seen.push({ url: String(input), method: init?.method ?? "GET" });
+    return {
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(JSON.stringify(body))
+    } as Response;
+  }) as unknown as typeof fetch;
+}
+
+test("capabilities asks the channel's capability route and unwraps the envelope", async () => {
+  const seen: { url: string; method: string }[] = [];
+  const gateway = new HttpChannelGateway({
+    baseUrl: "https://planes.example.test",
+    serviceToken: "svc",
+    transport: fetchSeen({ channel: "shopee", capabilities: { supportsStockSnapshotRead: true } }, seen)
+  });
+
+  const capabilities = await gateway.capabilities({ channel: "shopee" });
+
+  assert.equal(capabilities.supportsStockSnapshotRead, true);
+  assert.equal(seen[0]?.url, "https://planes.example.test/v1/channels/shopee/capabilities");
+});
+
+test("fetchStockSnapshot posts to the snapshot page route with the cursor", async () => {
+  const seen: { url: string; method: string }[] = [];
+  const gateway = new HttpChannelGateway({
+    baseUrl: "https://planes.example.test",
+    serviceToken: "svc",
+    transport: fetchSeen({ items: [], nextCursor: null }, seen)
+  });
+
+  await gateway.fetchStockSnapshot({ tenantId: "tnt-a", channel: "shopee", cursor: "c1" });
+
+  assert.equal(seen[0]?.url, "https://planes.example.test/v1/channels/shopee/stock-snapshot/page");
+  assert.equal(seen[0]?.method, "POST");
+});
+
+test("listStockLevels repeats the sku query param and unwraps the levels", async () => {
+  const seen: { url: string; method: string }[] = [];
+  const client = new HttpCommerceClient({
+    resolver: {
+      resolve: async () => ({ baseUrl: "https://a.medusa.example", secretKey: "key-a" })
+    },
+    transport: transportSeen({ levels: [{ sku: "SKU-1", available: 5 }] }, seen)
+  });
+
+  const levels = await client.listStockLevels({ tenantId: "tnt-a", skus: ["SKU-1", "SKU-2"] });
+
+  assert.deepEqual(levels, [{ sku: "SKU-1", available: 5 }]);
+  // One `sku=` per value, which is the shape the route's validator accepts.
+  assert.equal(seen[0]?.url, "https://a.medusa.example/admin/stock-levels?sku=SKU-1&sku=SKU-2");
 });
