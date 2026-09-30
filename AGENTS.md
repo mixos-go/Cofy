@@ -69,6 +69,7 @@ packages/channel-sdk      ->  packages/contracts
 packages/tenant-client    ->  packages/contracts
 packages/secrets          ->  packages/contracts
 packages/sync-state       ->  packages/contracts
+packages/workflow-queue   ->  packages/contracts
 packages/contracts        ->  (IMPORTS NOTHING)
 
 data-plane/*              ->  (runs INSIDE the tenant's Medusa instance, not in our services)
@@ -337,6 +338,20 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   (`packages/sync-state/testing`), or "the in-memory one mirrors the real one" is an assumption, and
   the difference surfaces as a production-only bug. The suite lives on a `./testing` subpath so
   `node:test` never loads in a running service.
+- **A job-id-deduping queue will silently drop a reschedule if the retry reuses the original id.**
+  BullMQ dedupes on job id across *every* state, not just pending: re-enqueueing a reschedule under
+  the id of the job that is currently being processed is a no-op, and the retry never runs. Derive a
+  fresh id from the retry's `runAt` (`<id>@<runAt>`) so two reschedules of one job to the same
+  instant still collapse into one retry. Identity for correctness is the idempotency lease, not the
+  job id (ADR 0013).
+- **A durable queue makes test isolation the test's job, not the adapter's.** The in-memory adapter
+  hands out a fresh instance per test; Redis does not, so one test's leftover jobs are delivered to
+  the next test's consumer unless each test drains the queue first. Run the same conformance suite
+  against both (`packages/workflow-queue/testing`) and reset the durable backing between tests.
+- **A package may import `@platform/contracts` and nothing else** (AGENTS.md §3). A dispatcher that
+  needs a logger declares a three-method interface locally — `Logger` from `@platform/observability`
+  satisfies it structurally — rather than taking a dependency on the observability package, which
+  the boundary checker rejects.
 
 ---
 

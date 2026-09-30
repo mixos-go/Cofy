@@ -1,0 +1,27 @@
+{
+  "name": "@platform/workflow-queue",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Engine-agnostic workflow dispatch: a WorkflowQueue port, an in-memory adapter, and a Redis/BullMQ adapter (ADR 0013).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./bullmq": "./src/bullmq.ts",
+    "./testing": "./testing/queue-conformance.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "test:integration": "node --test test/integration/*.test.ts"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*",
+    "bullmq": "^5.13.0",
+    "ioredis": "^5.11.1"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

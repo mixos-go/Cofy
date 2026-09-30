@@ -104,7 +104,8 @@ Concretely:
   Redis for the engine). The queue and the governor's future Redis-backed state should share one
   Redis, not two.
 - **`WorkflowQueue` is a new shared port**, so it belongs in `packages/contracts` or a small
-  `packages/workflow-queue`; where it lands is an implementation detail this ADR does not fix.
+  `packages/workflow-queue`; it landed in `packages/workflow-queue`, which depends only on
+  `@platform/contracts` so the boundary stays one-directional.
 - **A delayed job and an in-flight claim can both exist** for the same key while the lease is
   alive. The lease (not the queue) is what prevents a double effect, so the two must be tuned
   together: a retry delay longer than the lease TTL lets a second attempt start while the first is

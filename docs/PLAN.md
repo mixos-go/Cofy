@@ -490,10 +490,11 @@ boundary", not "shipped".
 **Goal.** The system repairs itself. A dropped webhook or a crashed worker becomes a non-event.
 
 **Status.** In progress. ADR 0013 is accepted (the workflows stay engine-agnostic behind a
-`WorkflowQueue` port; the governor is the only component that decides delay). The first deliverable —
-a durable sync-state store — is done and verified against real Postgres. Next is the `WorkflowQueue`
-port and adapters, then rescheduling a `CHANNEL_RATE_LIMITED` call through the queue (which also
-closes M3's open item).
+`WorkflowQueue` port; the governor is the only component that decides delay). The durable sync-state
+store is done and verified against real Postgres, and the `WorkflowQueue` port now has both adapters
+— in-memory and Redis/BullMQ — passing one conformance suite. Next is wiring the M3 workflow functions
+as units, then rescheduling a `CHANNEL_RATE_LIMITED` call through the queue (which also closes M3's
+open item).
 
 **Deliverables**
 
@@ -504,7 +505,13 @@ closes M3's open item).
   (`packages/sync-state/testing/store-conformance.ts`); the Postgres run adds a table-level
   uniqueness check. Evidence: `apps/services/control-plane/test/integration/sync-state-store.test.ts`
   — 26 pass, including "only one of two concurrent claims for the same key wins".)*
-- [ ] `WorkflowQueue` port + adapters (ADR 0013), wiring the M3 workflow functions as units.
+- **[x] `WorkflowQueue` port + adapters (ADR 0013)** — the producer port (`enqueue`/`schedule`), the
+  shared `dispatchJob` loop, an in-memory adapter, and a Redis/BullMQ adapter. *(Done: both adapters
+  run one conformance suite, `packages/workflow-queue/testing/queue-conformance.ts`; the BullMQ run
+  adds delayed delivery and restart survival, and proves a reschedule re-enqueues under a derived id
+  rather than being dropped by BullMQ's cross-state dedupe. Evidence:
+  `packages/workflow-queue/test/integration/bullmq-queue.test.ts` — 9 pass.)*
+- [ ] Wire the M3 workflow functions as queue units (register them in the worker's handler table).
 - [ ] Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After` — this
   also closes M3's open item (a throttled call is recorded failed today and never re-run).
 - [ ] Cursor-based pull for orders and stock snapshots, per tenant per channel.

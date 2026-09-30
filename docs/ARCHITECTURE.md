@@ -122,6 +122,7 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 | `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
 | `packages/rate-governor` | Central marketplace rate-limit scheduling: one budget per app key, one per seller | `contracts` |
 | `packages/sync-state` | Platform-owned sync state: external-order refs, idempotency records, SKU→channel maps, cursors | `contracts` |
+| `packages/workflow-queue` | Engine-agnostic workflow dispatch: the `WorkflowQueue` producer port, the shared dispatch loop, an in-memory adapter, a Redis/BullMQ adapter (ADR 0013) | `contracts` |
 
 `packages/sync-state` is the platform's half of the order/stock pipeline. It stores only stitched
 identifiers and cursors, never product, order, or stock data — that stays in the tenant data plane.
@@ -246,6 +247,7 @@ packages/                   # stable shared libraries — few, slow to change
   secrets/
   observability/
   sync-state/
+  workflow-queue/
 connectors/                 # adapters — volatile, one package per channel
   tiktok-tokopedia/
   shopee/                   # built early, ahead of its M8 milestone
