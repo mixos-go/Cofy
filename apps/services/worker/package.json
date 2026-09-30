@@ -16,7 +16,9 @@
     "@platform/contracts": "workspace:*",
     "@platform/observability": "workspace:*",
     "@platform/secrets": "workspace:*",
-    "@platform/sync-state": "workspace:*"
+    "@platform/sync-state": "workspace:*",
+    "@platform/workflow-queue": "workspace:*",
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@platform/tsconfig": "workspace:*",

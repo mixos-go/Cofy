@@ -205,6 +205,44 @@ export function runSyncStateStoreConformance(
     );
   });
 
+  test(`${label}: an abandoned claim can be re-claimed, which is what a governor reschedule needs`, async () => {
+    const state = await makeStore();
+    await state.claimIdempotency({ tenantId: "tnt-a", key: "k1", operation: "stock.push", fingerprint: "fp-1", now: NOW });
+
+    const abandoned = await state.abandonIdempotency("tnt-a", "k1", NOW);
+    assert.equal(abandoned?.outcome, "in_progress");
+    assert.equal(await state.getIdempotency("tnt-a", "k1"), null, "the key is unclaimed again");
+
+    // The rescheduled retry must be able to take the key. If the claim were left in place this
+    // would be `in_flight` and the retry would silently do nothing.
+    const retry = await state.claimIdempotency({
+      tenantId: "tnt-a",
+      key: "k1",
+      operation: "stock.push",
+      fingerprint: "fp-1",
+      now: NOW
+    });
+    assert.equal(retry.kind, "claimed");
+  });
+
+  test(`${label}: a succeeded or failed record cannot be abandoned`, async () => {
+    const state = await makeStore();
+    await state.claimIdempotency({ tenantId: "tnt-a", key: "k1", operation: "op", fingerprint: "fp", now: NOW });
+    await state.completeIdempotency({ tenantId: "tnt-a", key: "k1", outcome: "succeeded", result: null, now: NOW });
+
+    // Erasing a completed write would let a later attempt repeat it under the same key.
+    await assert.rejects(
+      () => state.abandonIdempotency("tnt-a", "k1", NOW),
+      (error: unknown) => error instanceof PlatformError && error.code === "CONFLICT"
+    );
+    assert.equal((await state.getIdempotency("tnt-a", "k1"))?.outcome, "succeeded");
+  });
+
+  test(`${label}: abandoning an unknown key is a no-op, not an error`, async () => {
+    const state = await makeStore();
+    assert.equal(await state.abandonIdempotency("tnt-a", "never-claimed", NOW), null);
+  });
+
   test(`${label}: idempotency keys are scoped per tenant`, async () => {
     const state = await makeStore();
     await state.claimIdempotency({ tenantId: "tnt-a", key: "k1", operation: "op", fingerprint: "fp", now: NOW });

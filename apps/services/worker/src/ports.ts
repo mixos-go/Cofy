@@ -59,6 +59,14 @@ export interface SyncStateClient {
     readonly outcome: "succeeded" | "failed";
     readonly result: unknown;
   }): Promise<void>;
+  /**
+   * Release a claim this attempt never used, so a rescheduled retry can take it (ADR 0013).
+   *
+   * Called when the governor refused the marketplace call: nothing was sent, so neither
+   * `succeeded` nor `failed` describes the operation, and leaving the claim in place would turn
+   * the retry into a no-op until the lease expired.
+   */
+  abandonIdempotency(input: { readonly tenantId: TenantId; readonly key: string }): Promise<void>;
 
   upsertSkuMap(entry: ChannelSkuMap): Promise<void>;
   getSkuMap(input: {
@@ -287,6 +295,10 @@ export class HttpSyncStateClient implements SyncStateClient {
     readonly result: unknown;
   }) {
     await this.#post("/v1/sync/idempotency/complete", input);
+  }
+
+  async abandonIdempotency(input: { readonly tenantId: TenantId; readonly key: string }) {
+    await this.#post("/v1/sync/idempotency/abandon", input);
   }
 
   async upsertSkuMap(entry: ChannelSkuMap) {

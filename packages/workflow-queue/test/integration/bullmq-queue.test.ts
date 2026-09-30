@@ -14,8 +14,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Queue } from "bullmq";
+import type { ConnectionOptions } from "bullmq";
 import { Redis } from "ioredis";
-import { BullMqWorkflowConsumer, BullMqWorkflowQueue } from "@platform/workflow-queue/bullmq";
+import {
+  BullMqWorkflowConsumer,
+  BullMqWorkflowQueue,
+  connectionOptionsFromUrl
+} from "@platform/workflow-queue/bullmq";
 import { runWorkflowQueueConformance } from "@platform/workflow-queue/testing";
 
 const REDIS_URL = process.env.TEST_REDIS_URL;
@@ -57,15 +62,9 @@ if (REDIS_URL === undefined) {
   // Only the dispatcher's three methods are used, so a no-op logger is enough here.
   const logger = { info() {}, warn() {}, error() {} };
 
-  /** Parse a `redis://host:port/db` URL into the options BullMQ expects. */
-  function connectionOptions(): { host: string; port: number; db?: number } {
-    const parsed = new URL(url);
-    const db = parsed.pathname.replace("/", "");
-    return {
-      host: parsed.hostname,
-      port: Number(parsed.port === "" ? 6379 : parsed.port),
-      ...(db === "" ? {} : { db: Number(db) })
-    };
+  /** The adapter's own URL parser, so the test exercises the same one the service boots with. */
+  function connectionOptions(): ConnectionOptions {
+    return connectionOptionsFromUrl(url);
   }
 
   async function flush(): Promise<void> {
@@ -195,6 +194,89 @@ if (REDIS_URL === undefined) {
       await consumer.stop();
       assert.deepEqual(seen, ["survivor-1"]);
     } finally {
+      await queue.close();
+    }
+  });
+
+  test("bullmq: a completed job's id is free again, so arm() can seed a fresh pass", async () => {
+    // BullMQ retains a completed job in Redis, so a naive "getJob found ⇒ dedupe" would make every
+    // later enqueue under that id a silent no-op. The reconciliation scheduler relies on the opposite:
+    // `arm()` reuses the base id on every boot, and it must actually seed a pass after the previous
+    // one completed, or a restarted worker would reconcile nothing.
+    await flush();
+    const connection = connectionOptions();
+    const queue = new BullMqWorkflowQueue({ connection, queueName: QUEUE_NAME });
+    const seen: string[] = [];
+    const consumer = new BullMqWorkflowConsumer({
+      connection,
+      queue,
+      handlers: {
+        "reconcile.orders": async (job) => {
+          seen.push(job.jobId);
+          return { kind: "completed" };
+        }
+      },
+      logger,
+      queueName: QUEUE_NAME
+    });
+    consumer.start();
+
+    try {
+      const first = await queue.enqueue("reconcile.orders", "tnt-a", "shopee", {}, { jobId: "arm-1" });
+      assert.equal(first.deduped, false);
+      let deadline = Date.now() + 5000;
+      while (seen.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(seen, ["arm-1"]);
+
+      // The restart path: same id, work already completed. This must enqueue and run, not dedupe.
+      const second = await queue.enqueue("reconcile.orders", "tnt-a", "shopee", {}, { jobId: "arm-1" });
+      assert.equal(second.deduped, false, "a completed id must not absorb the re-arm");
+      deadline = Date.now() + 5000;
+      while (seen.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(seen, ["arm-1", "arm-1"], "the re-armed pass actually ran");
+    } finally {
+      await consumer.stop();
+      await queue.close();
+    }
+  });
+
+  test("bullmq: reconciliation keeps its cadence across passes, re-arming under a fresh id", async () => {
+    // The M4 cadence end to end: a completed pass schedules its own next run under `base@runAt`. Two
+    // passes must run, which is what proves the cadence continues rather than stopping after one.
+    await flush();
+    const connection = connectionOptions();
+    const queue = new BullMqWorkflowQueue({ connection, queueName: QUEUE_NAME });
+    const runs: string[] = [];
+    const consumer = new BullMqWorkflowConsumer({
+      connection,
+      queue,
+      handlers: {
+        "reconcile.orders": async (job) => {
+          runs.push(job.jobId);
+          if (runs.length < 2) {
+            const runAt = new Date(Date.now() + 200).toISOString();
+            await queue.schedule("reconcile.orders", job.tenantId, job.channel, {}, {
+              jobId: `reconcile.orders:${job.tenantId}:${job.channel}@${runAt}`,
+              runAt
+            });
+          }
+          return { kind: "completed" };
+        }
+      },
+      logger,
+      queueName: QUEUE_NAME
+    });
+    consumer.start();
+
+    try {
+      await queue.enqueue("reconcile.orders", "tnt-a", "shopee", {}, { jobId: "reconcile.orders:tnt-a:shopee" });
+      const deadline = Date.now() + 5000;
+      while (runs.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(runs.length, 2, "the cadence must continue past the first pass");
+      assert.equal(runs[0], "reconcile.orders:tnt-a:shopee");
+      assert.equal(runs[1]?.startsWith("reconcile.orders:tnt-a:shopee@"), true);
+    } finally {
+      await consumer.stop();
       await queue.close();
     }
   });

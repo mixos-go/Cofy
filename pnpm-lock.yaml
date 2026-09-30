@@ -109,6 +109,12 @@ importers:
       '@platform/sync-state':
         specifier: workspace:*
         version: link:../../../packages/sync-state
+      '@platform/workflow-queue':
+        specifier: workspace:*
+        version: link:../../../packages/workflow-queue
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
     devDependencies:
       '@platform/tsconfig':
         specifier: workspace:*

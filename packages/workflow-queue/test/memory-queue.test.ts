@@ -55,6 +55,17 @@ test("in-memory: taking a job removes it, so it is not delivered twice", async (
   assert.equal(await queue.take(NOW), null);
 });
 
+test("in-memory: an id is free again once its job is taken, so arm() can seed a fresh pass", async () => {
+  // The counterpart of the BullMQ "completed id is free" test. The scheduler reuses a target's base id
+  // on every boot, so a settled job must not keep the id reserved.
+  const queue = makeQueue();
+  const first = await queue.enqueue("reconcile.orders", "tnt-a", "shopee", {}, { jobId: "arm-1" });
+  assert.equal(first.deduped, false);
+  await queue.take(NOW);
+  const again = await queue.enqueue("reconcile.orders", "tnt-a", "shopee", {}, { jobId: "arm-1" });
+  assert.equal(again.deduped, false);
+});
+
 test("dispatch: a completed unit runs the handler and does not re-enqueue", async () => {
   const queue = makeQueue();
   const outcome = await dispatchJob(job(), { "order.import": async () => ({ kind: "completed" }) }, queue, logger());
@@ -85,6 +96,23 @@ test("dispatch: two reschedules of one job to the same instant collapse to one r
   };
   await dispatchJob(job(), handlers, queue, logger());
   await dispatchJob(job(), handlers, queue, logger());
+  assert.equal(queue.pendingCount(), 1);
+});
+
+test("dispatch: repeated reschedules keep the derived id finite", async () => {
+  // A unit that is throttled several times in a row must not chain `<id>@t1@t2@t3…`. The retry id is
+  // derived from the base id, so the second reschedule of the same target produces a plain two-part id.
+  const queue = makeQueue();
+  const handlers = {
+    "order.import": async () => ({ kind: "reschedule" as const, runAt: LATER, reason: "app_budget" })
+  };
+  const first = await dispatchJob(job(), handlers, queue, logger());
+  assert.equal(first.result, "reschedule");
+
+  const retryId = `j1@${LATER}`;
+  const second = await dispatchJob(job({ jobId: retryId }), handlers, queue, logger());
+  assert.equal(second.result, "reschedule");
+  assert.equal(queue.runAtOf(retryId), LATER, "the same instant collapses onto one id");
   assert.equal(queue.pendingCount(), 1);
 });
 

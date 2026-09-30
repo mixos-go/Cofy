@@ -348,6 +348,12 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   hands out a fresh instance per test; Redis does not, so one test's leftover jobs are delivered to
   the next test's consumer unless each test drains the queue first. Run the same conformance suite
   against both (`packages/workflow-queue/testing`) and reset the durable backing between tests.
+- **A job-id-deduping queue keeps terminal jobs, so "id exists" is not "id is taken".** BullMQ retains
+  a completed or failed job in Redis indefinitely. An `enqueue` that dedupes on mere existence would
+  make every later enqueue under that id a silent no-op — and the reconciliation scheduler reuses a
+  target's base id on every boot, so a restarted worker would reconcile nothing. Dedupe only on a
+  non-terminal state (`waiting`/`active`/`delayed`/…); a terminal id must be freed before re-adding.
+  This is the same failure shape as the reschedule-id rule above, one state further along.
 - **A package may import `@platform/contracts` and nothing else** (AGENTS.md §3). A dispatcher that
   needs a logger declares a three-method interface locally — `Logger` from `@platform/observability`
   satisfies it structurally — rather than taking a dependency on the observability package, which

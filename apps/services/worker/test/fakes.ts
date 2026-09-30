@@ -43,6 +43,9 @@ export function syncStateClient(store: InMemorySyncStateStore): SyncStateClient 
         now: now()
       });
     },
+    abandonIdempotency: async (input) => {
+      await store.abandonIdempotency(input.tenantId, input.key, now());
+    },
     upsertSkuMap: async (entry) => {
       await store.upsertSkuMap(entry);
     },
@@ -60,11 +63,18 @@ type OrderPage = { readonly items: readonly ChannelOrder[]; readonly nextCursor:
 export class FakeChannelGateway implements ChannelGateway {
   readonly #orderPages = new Map<string, OrderPage>();
   readonly #listingPages = new Map<string, { items: readonly ChannelListing[]; nextCursor: string | null }>();
+  #pagesRead = 0;
   readonly pushCalls: { tenantId: TenantId; channel: ChannelCode; items: readonly StockUpdate[] }[] = [];
-  /** Results the marketplace (via the connector) returns for the next push, keyed by SKU. */
   pushResults: ReadonlyMap<string, StockResult> = new Map();
   /** When set, the next push throws this, to exercise the failure path. */
   pushError: Error | null = null;
+  /** When set, the next order read throws this — e.g. the governor refusing the call. */
+  fetchOrdersError: Error | null = null;
+  /**
+   * Throw once after this many successful reads, to simulate a crash mid-pass. A plain
+   * `fetchOrdersError` cannot do this: it fails the *first* read, before any page has committed.
+   */
+  fetchOrdersErrorAfterPages: number | null = null;
   readonly orderFetches: { tenantId: TenantId; channel: ChannelCode; cursor: string | null }[] = [];
 
   withOrderPage(key: string, page: OrderPage): this {
@@ -82,6 +92,18 @@ export class FakeChannelGateway implements ChannelGateway {
     readonly channel: ChannelCode;
     readonly cursor: string | null;
   }): Promise<OrderPage> {
+    if (this.fetchOrdersError !== null) {
+      const error = this.fetchOrdersError;
+      this.fetchOrdersError = null;
+      throw error;
+    }
+    if (this.fetchOrdersErrorAfterPages !== null) {
+      this.#pagesRead += 1;
+      if (this.#pagesRead > this.fetchOrdersErrorAfterPages) {
+        this.fetchOrdersErrorAfterPages = null;
+        throw new PlatformError("UPSTREAM_ERROR", "Simulated crash mid-pass.");
+      }
+    }
     this.orderFetches.push(input);
     const key = `${input.channel}:${input.cursor ?? "start"}`;
     return this.#orderPages.get(key) ?? { items: [], nextCursor: null };

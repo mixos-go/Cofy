@@ -486,6 +486,28 @@ export class PostgresSyncStateStore implements SyncStateStore {
     return row === undefined ? null : idempotencyFromRow(row);
   }
 
+  async abandonIdempotency(tenantId: TenantId, key: string, now: Instant): Promise<IdempotencyRecord | null> {
+    await this.#ensureSchema();
+    return this.#withTx(async (client) => {
+      const existing = await this.#lockedIdempotency(client, tenantId, key);
+      if (existing === undefined) return null;
+      if (existing.outcome !== "in_progress") {
+        // `succeeded` is a completed write and `failed` is a signal reconciliation owns. Removing
+        // either would erase a fact, so only a claim that never reached the channel may be released.
+        throw new PlatformError("CONFLICT", "Only an in-progress idempotency claim can be abandoned.", {
+          details: { key, outcome: existing.outcome }
+        });
+      }
+      // Delete rather than mark: the key is unclaimed again, so the rescheduled retry claims it
+      // fresh. Nothing was written under it, so there is no operation to bind a retry to.
+      await client.query(
+        `delete from ${this.#schema}.idempotency_records where tenant_id = $1 and key = $2`,
+        [tenantId, key]
+      );
+      return { ...existing, updatedAt: now };
+    });
+  }
+
   async #lockedIdempotency(
     client: PoolClient,
     tenantId: TenantId,

@@ -90,10 +90,14 @@ plane and worker over HTTP with a service token — services never import each o
 Owns *executing work over time*.
 
 - Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
-- Runs the reconciliation scheduler.
-- Owns the workflow engine connection. *(Today the process wires its HTTP ports and exposes health,
-  but starts no timer: no sync work runs without the engine, per AGENTS.md §2.5. Workflows are
-  exercised in tests, not yet driven by a running deployment.)*
+- Runs the reconciliation scheduler: it seeds the first `reconcile.orders` pass per target and the
+  unit re-arms its own next run, so the cadence lives in the queue and survives a restart.
+- Owns the workflow engine connection. *(The process starts the BullMQ consumer and requires
+  `WORKFLOW_ENGINE_REDIS_URL`: no sync work runs without the engine, per AGENTS.md §2.5, so a worker
+  that cannot reach Redis refuses to start rather than degrade to a timer.)*
+- `createWorkflowHandlers` (`src/units.ts`) is the one place a queued job becomes a call into a
+  workflow; it validates the payload and maps the outcome, including a `CHANNEL_RATE_LIMITED` to a
+  `reschedule` carrying the governor's `Retry-After`.
 
 The workflows live in `@platform/worker` as functions that take ports, so the same unit runs under
 the engine and under a test. It orchestrates over HTTP: the control plane's sync-state surface for

@@ -89,6 +89,15 @@ const syncIdempotencyCompleteBody = z.object({
   result: z.unknown().optional()
 });
 
+/**
+ * Releasing a claim a deferred attempt never used. No outcome field: an abandon is precisely the
+ * absence of one, and accepting `outcome` here would let a caller turn it into a completion.
+ */
+const syncIdempotencyAbandonBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  key: z.string().min(1).max(200)
+});
+
 const skuMapBody = z.object({
   tenantId: z.string().min(1).max(64),
   sku: z.string().min(1).max(200),
@@ -296,6 +305,17 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
           result: parsed.result ?? null,
           now: new Date().toISOString()
         });
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/sync/idempotency/abandon",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = syncIdempotencyAbandonBody.parse(body);
+        return {
+          record: await options.syncState.abandonIdempotency(parsed.tenantId, parsed.key, new Date().toISOString())
+        };
       }
     },
     {

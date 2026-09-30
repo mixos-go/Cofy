@@ -103,6 +103,23 @@ export interface SyncStateStore {
   }): Promise<IdempotencyRecord>;
   getIdempotency(tenantId: TenantId, key: string): Promise<IdempotencyRecord | null>;
 
+  /**
+   * Release an `in_progress` claim without recording an outcome, returning the key to unclaimed.
+   *
+   * This is the primitive a *deferred* attempt needs. When the governor refuses a marketplace call,
+   * the workflow claimed the key but never sent anything, so the work is still valid and must run
+   * later. Neither terminal outcome is honest: `failed` would tell reconciliation that a throttled
+   * call is a broken operation and would make a replay return a result no attempt produced, while
+   * leaving it `in_progress` would make the rescheduled retry a no-op until the lease expires.
+   *
+   * Only an `in_progress` claim can be abandoned. A `succeeded` record is a completed write and a
+   * `failed` one is a signal reconciliation owns, so both are refused rather than deleted.
+   *
+   * Returns the abandoned record, or null when there was nothing to abandon (a retry is safe
+   * either way, so this is not an error).
+   */
+  abandonIdempotency(tenantId: TenantId, key: string, now: Instant): Promise<IdempotencyRecord | null>;
+
   /** Upsert one SKU → channel variant mapping from a listing import (ADR 0009). */
   upsertSkuMap(entry: ChannelSkuMap): Promise<ChannelSkuMap>;
   getSkuMap(tenantId: TenantId, channel: ChannelCode, sku: string): Promise<ChannelSkuMap | null>;
@@ -328,6 +345,24 @@ export class InMemorySyncStateStore implements SyncStateStore {
 
   async getIdempotency(tenantId: TenantId, key: string): Promise<IdempotencyRecord | null> {
     return this.#idempotency.get(`${tenantId}\u0000${key}`) ?? null;
+  }
+
+  async abandonIdempotency(tenantId: TenantId, key: string, now: Instant): Promise<IdempotencyRecord | null> {
+    const mapKey = `${tenantId}\u0000${key}`;
+    const existing = this.#idempotency.get(mapKey);
+    if (existing === undefined) return null;
+    if (existing.outcome !== "in_progress") {
+      // `succeeded` is a completed write and `failed` is a signal reconciliation owns. Removing
+      // either would erase a fact, so only a claim that never reached the channel may be released.
+      throw new PlatformError("CONFLICT", "Only an in-progress idempotency claim can be abandoned.", {
+        details: { key, outcome: existing.outcome }
+      });
+    }
+    // Delete rather than mark: the claim is gone, so the key is unclaimed again and the rescheduled
+    // retry claims it fresh. The fingerprint binding goes with it, which is correct — nothing was
+    // written under this key, so there is no operation to bind a retry to.
+    this.#idempotency.delete(mapKey);
+    return { ...existing, updatedAt: now };
   }
 
   /**

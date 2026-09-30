@@ -22,6 +22,7 @@ import { PLATFORM_EVENTS } from "@platform/contracts";
 import type { Logger } from "@platform/observability";
 import type { ChannelGateway, SyncStateClient } from "./ports.ts";
 import type { EventPublisher } from "./order-import.ts";
+import { isRateLimited, releaseDeferredClaim } from "./rate-limit.ts";
 
 export interface StockPushContext {
   readonly syncState: SyncStateClient;
@@ -81,6 +82,15 @@ export async function pushStockOnce(
   try {
     results = await gateway.pushStock({ tenantId, channel, items: resolved });
   } catch (error) {
+    if (isRateLimited(error)) {
+      // The governor refused the call, so nothing was pushed and the batch is still valid. Recording
+      // it failed would tell reconciliation a healthy push is broken and would make the replay return
+      // a result no attempt produced. Release the claim instead, so the rescheduled retry can take
+      // it, and rethrow for the unit handler to turn into a deferral (ADR 0013).
+      await releaseDeferredClaim(syncState, { tenantId, key, logger });
+      logger.warn("stock.push.deferred", { tenantId, channel, reason: "rate_limited" });
+      throw error;
+    }
     await syncState.completeIdempotency({ tenantId, key, outcome: "failed", result: null });
     await events.publish(PLATFORM_EVENTS.STOCK_PUSH_FAILED, {
       tenantId,

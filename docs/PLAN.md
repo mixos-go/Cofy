@@ -25,7 +25,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | In progress — durable sync-state store done; workflow queue next | M3 |
+| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/metrics remain | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -452,15 +452,17 @@ boundary", not "shipped".
 - Governor state is in-memory per process. With more than one instance each process would allow the
   full app budget, so we would exceed the marketplace limit. Single process is correct for M3; the
   Redis-backed store lands behind the same interface before horizontal scaling.
-- The governor now gates the call, but rescheduling is not yet automatic: a refused call returns
-  `429` and records the failure, and nothing re-runs it until M4 teaches the workflow engine to
-  reschedule on `CHANNEL_RATE_LIMITED`. The budget is enforced (no over-budget call leaves the
-  plane); the work is not yet requeued by itself.
+- The governor gates the call, and rescheduling is now automatic: a refused call returns `429`
+  `CHANNEL_RATE_LIMITED` with a `Retry-After`, the worker releases the idempotency claim and
+  reschedules the unit at that time through the queue (M4, ADR 0013). The budget is enforced (no
+  over-budget call leaves the plane) and the work requeues itself. What is still open is the
+  *inventory* of what to reconcile: the worker takes its targets from `RECONCILIATION_TARGETS` because
+  the control plane exposes tenants and connections only to a seller session, not to a service token.
 - Sync state is durable when `DATABASE_URL` is configured: the control plane now selects
   `PostgresSyncStateStore` (ADR 0010), and the in-memory store remains only as the
   no-infrastructure local default. Both implementations are held to one shared conformance suite
-  (`packages/sync-state/testing/store-conformance.ts`): 24 tests over the in-memory store, and the
-  same 24 plus a table-level uniqueness check over a real Postgres
+  (`packages/sync-state/testing/store-conformance.ts`): 27 tests over the in-memory store, and the
+  same suite plus a table-level uniqueness check over a real Postgres
   (`apps/services/control-plane/test/integration/sync-state-store.test.ts`). Durable sync state is
   the prerequisite for M4's "kill the worker mid-reconciliation; restart resumes without
   duplicating effects" — an engine that survives a restart over state that does not would be a
@@ -491,10 +493,12 @@ boundary", not "shipped".
 
 **Status.** In progress. ADR 0013 is accepted (the workflows stay engine-agnostic behind a
 `WorkflowQueue` port; the governor is the only component that decides delay). The durable sync-state
-store is done and verified against real Postgres, and the `WorkflowQueue` port now has both adapters
-— in-memory and Redis/BullMQ — passing one conformance suite. Next is wiring the M3 workflow functions
-as units, then rescheduling a `CHANNEL_RATE_LIMITED` call through the queue (which also closes M3's
-open item).
+store is done and verified against real Postgres, the `WorkflowQueue` port has both adapters —
+in-memory and Redis/BullMQ — passing one conformance suite, and the worker now runs the engine: the
+M3 workflow functions are registered as units, a `CHANNEL_RATE_LIMITED` is rescheduled with the
+governor's `Retry-After` (closing M3's open item), and `reconcile.orders` converges through the same
+pull path on a cadence that lives in the queue. What remains is drift *classification* and its
+metrics, plus a real-Redis restart test.
 
 **Deliverables**
 
@@ -511,31 +515,64 @@ open item).
   adds delayed delivery and restart survival, and proves a reschedule re-enqueues under a derived id
   rather than being dropped by BullMQ's cross-state dedupe. Evidence:
   `packages/workflow-queue/test/integration/bullmq-queue.test.ts` — 9 pass.)*
-- [ ] Wire the M3 workflow functions as queue units (register them in the worker's handler table).
-- [ ] Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After` — this
-  also closes M3's open item (a throttled call is recorded failed today and never re-run).
-- [ ] Cursor-based pull for orders and stock snapshots, per tenant per channel.
-- Drift detection: compare pulled state against local state, classify drift type.
-- Repair via the same idempotent workflows used by real-time paths (no second code path).
-- Cursor advance only after successful commit; safe re-run.
-- Drift metrics and alerting: drift rate, repair latency, unresolved drift count.
-- Retention policy for raw events and idempotency records.
+- **[x] Wire the M3 workflow functions as queue units** — `createWorkflowHandlers` in
+  `apps/services/worker/src/units.ts` is the one place a job becomes a call into a workflow, with the
+  payload validated at the boundary. *(Done: `apps/services/worker/test/units.test.ts` proves a queued
+  job reaches the import workflow and creates the order, and that a job without a channel or with a
+  malformed payload is failed rather than guessed at.)*
+- **[x] Reschedule on `CHANNEL_RATE_LIMITED` through the queue with the governor's `Retry-After`** —
+  also closes M3's open item. *(Done: a deferral is not a failure. `pushStockOnce` releases its
+  idempotency claim and rethrows, and the unit table turns the error into a `reschedule` carrying the
+  governor's `Retry-After`; the delay is read, never computed, by the worker. Evidence:
+  `apps/services/worker/test/units.test.ts` — the retry pushes after the deferral, and no
+  `stock.push_failed` event is emitted for a throttled call.)*
+- **[x] Cursor-based pull for orders, per tenant per channel, on a queue-owned cadence** —
+  `ReconciliationScheduler` seeds the first pass and `reconcile.orders` re-arms its own next run, so
+  the cadence survives a restart instead of living in a timer (AGENTS.md §2.5). *(Done: the unit calls
+  the same `importOrdersOnce` as the real-time path — no second repair code path (ADR 0002). Evidence:
+  `apps/services/worker/test/reconcile.test.ts` and the `reconcile.orders` case in `units.test.ts`.)*
+- [ ] Drift detection: compare pulled state against local state, classify drift type.
+- [ ] Repair via the same idempotent workflows used by real-time paths (no second code path).
+- [ ] Cursor advance only after successful commit; safe re-run.
+- [ ] Drift metrics and alerting: drift rate, repair latency, unresolved drift count.
+- [ ] Retention policy for raw events and idempotency records.
+- [ ] A real-Redis integration test that kills the worker mid-pass and proves the restart resumes
+      without duplicating effects (the queue's durability is proven; the resume-through-a-pass is not).
 - **Only if a channel documents its webhook signature**: a webhook receiver (verify, persist raw,
   dedup, enqueue, return fast). Until then reconciliation is the whole story, which ADR 0002 already
   makes the source of truth.
 
 **Exit criteria**
 
-- [ ] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
-      are not required, so this is the normal case today, not a degraded mode).
+- [~] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
+      are not required, so this is the normal case today, not a degraded mode). *Orders converge
+      today; the stock snapshot pull is still open, so this is partial.*
 - [ ] Injected drift (delete a local order, corrupt a stock level) is detected and repaired.
-- [ ] Reconciliation respects the rate-limit budget and never starves real-time operations.
-- [ ] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects.
+- [x] Reconciliation respects the rate-limit budget and never starves real-time operations. *(A
+      refusal defers the unit with the governor's `Retry-After` instead of failing it, and the queue
+      carries no second limiter, so there is one budget — ADR 0013.)*
+- [~] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects. *The
+      durable queue and the idempotency lease are in place and unit-tested; the end-to-end restart
+      test on real Redis is still open.*
 - [ ] Drift dashboard shows unresolved drift returning to zero after repair.
 
 **Non-goals**
 
 - No cross-tenant analytics. No historical backfill beyond the channel's API limits.
+
+**Known limits (recorded, not hidden)**
+
+- BullMQ retains a completed job in Redis until something removes it, and the re-arming cadence uses a
+  fresh id per pass (`<base>@<runAt>`), so completed passes accumulate at a known rate (one per target
+  per interval). That is bounded work but unbounded storage; the retention-policy deliverable above is
+  what closes it. The adapter removes a terminal job only when its id is reused — the `arm()` bootstrap
+  path — because inventing a keep-count in the adapter would put an operator's policy decision in code
+  (the same reason `RECONCILIATION_INTERVAL_SECONDS` has no default).
+- Reconciliation targets are declared in `RECONCILIATION_TARGETS` rather than discovered. The worker
+  cannot enumerate tenants and connections yet: the control plane exposes that inventory only to a
+  seller session, not to a service token. Until a service-token inventory route exists, an operator
+  declares the targets, and a malformed entry stops startup instead of silently reconciling fewer
+  tenants than intended.
 
 ---
 

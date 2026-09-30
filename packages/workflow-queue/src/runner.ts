@@ -20,6 +20,18 @@ export interface DispatchOutcome {
 }
 
 /**
+ * The producer's id without any reschedule suffix this runner appended.
+ *
+ * `@` separates the base id from the `runAt` a reschedule derives, so the base is everything before
+ * the first `@`. Only ids this runner produced contain one; a producer-chosen id must not, which is
+ * what lets this stay a pure function of the id rather than of the queue's history.
+ */
+function baseJobId(jobId: string): string {
+  const at = jobId.indexOf("@");
+  return at === -1 ? jobId : jobId.slice(0, at);
+}
+
+/**
  * Run one job and act on its result.
  *
  * The three outcomes are deliberately asymmetric:
@@ -66,10 +78,15 @@ export async function dispatchJob(
     // A derived id, not the original. The engine is asked to run this unit again at a new time while
     // the current job is still being processed; reusing the id would let a job-id-dedupe engine
     // (BullMQ dedupes across every state) silently drop the retry. Identity for correctness lives in
-    // the workflow's idempotency lease, not the job id (ADR 0013). Deriving it from `runAt` keeps two
-    // concurrent reschedules of one job to the same instant collapsing into one retry.
+    // the workflow's idempotency lease, not the job id (ADR 0013).
+    //
+    // Derived from the *base* id, not the current one: a unit that reschedules repeatedly (a scan
+    // that re-arms itself, or a job throttled several times in a row) would otherwise chain
+    // `<id>@t1@t2@t3…` and grow without bound. Trimming to the base keeps ids finite and still
+    // collapses two reschedules of one job to the same instant into one retry. This is why `@` is
+    // reserved in a producer-chosen job id.
     await queue.schedule(job.unit, job.tenantId, job.channel, job.payload, {
-      jobId: `${job.jobId}@${result.runAt}`,
+      jobId: `${baseJobId(job.jobId)}@${result.runAt}`,
       runAt: result.runAt
     });
     logger.info("workflow.rescheduled", {
