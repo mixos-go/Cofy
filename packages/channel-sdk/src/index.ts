@@ -1,7 +1,9 @@
 import type {
+  ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
+  ChannelStockLevel,
   Cursor,
   Instant,
   Page,
@@ -45,6 +47,18 @@ export interface ChannelConnector {
    * `capabilities().supportsListingRead`.
    */
   fetchListings(cursor: Cursor, credential: Credential): Promise<Page<ChannelListing>>;
+
+  /**
+   * Pull a page of stock levels, so a corrupted level on the channel can be detected (docs/adr/0015).
+   *
+   * This is the read direction of stock: `pushStock` tells a marketplace a number, this asks what it
+   * currently thinks, and reconciliation compares the two. The cursor is opaque outside this
+   * connector, like the order and listing cursors.
+   *
+   * A channel that cannot report a variant's stock does not implement this, and declares
+   * `capabilities().supportsStockSnapshotRead` as `false`.
+   */
+  fetchStockSnapshot(cursor: Cursor, credential: Credential): Promise<Page<ChannelStockLevel>>;
 
   /** Tell the marketplace we have accepted an order, when the channel requires it. */
   acknowledgeOrder(externalOrderId: string, credential: Credential): Promise<void>;
@@ -108,16 +122,7 @@ export interface WebhookEnvelope {
 /**
  * Declared support for a channel.
  *
- * `false` here is a promise to the rest of the system that the feature will not be attempted,
- * not an admission of a bug.
+ * Re-exported from `@platform/contracts` so a connector has one import site and the worker, which
+ * cannot import this package, can still read the same type (docs/adr/0015, AGENTS.md §3).
  */
-export interface ChannelCapabilities {
-  readonly supportsOrderPull: boolean;
-  readonly supportsStockPush: boolean;
-  readonly supportsWebhooks: boolean;
-  readonly supportsOrderAcknowledgement: boolean;
-  /** True when order history must be read from a second API (see docs/adr/0003). */
-  readonly splitsOrderHistory: boolean;
-  /** True when the channel exposes listings we can read to map our SKUs (docs/adr/0009). */
-  readonly supportsListingRead: boolean;
-}
+export type { ChannelCapabilities } from "@platform/contracts";

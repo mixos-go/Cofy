@@ -35,11 +35,29 @@ export interface ReconciliationSchedulerOptions {
   readonly intervalSeconds: number;
   readonly logger: WorkflowLogger;
   readonly now?: () => Date;
+  /**
+   * Which channels can report stock (docs/adr/0015), asked of the integration plane at startup.
+   *
+   * A stock pass is only armed for a channel whose connector implements the snapshot read: arming it
+   * for a channel that cannot report stock would spend the shared budget on a walk that can only
+   * fail. Defaults to "no channel", so a caller that has not asked arms only order reconciliation.
+   */
+  readonly stockCapableChannels?: (channel: ChannelCode) => boolean;
 }
 
-/** The job id a target's initial pass uses. Stable, so a restart's `arm()` collapses onto it. */
+/** The job id a target's initial order pass uses. Stable, so a restart's `arm()` collapses onto it. */
 export function reconciliationJobId(target: ReconciliationTarget): string {
   return `reconcile.orders:${target.tenantId}:${target.channel}`;
+}
+
+/** The job id a target's initial stock pass uses (docs/adr/0015). */
+export function stockReconciliationJobId(target: ReconciliationTarget): string {
+  return `reconcile.stock:${target.tenantId}:${target.channel}`;
+}
+
+/** The base id for one unit's target. The unit is part of the id, so the passes never collide. */
+export function reconcileJobIdFor(unit: "reconcile.orders" | "reconcile.stock", target: ReconciliationTarget): string {
+  return unit === "reconcile.orders" ? reconciliationJobId(target) : stockReconciliationJobId(target);
 }
 
 /**
@@ -52,8 +70,12 @@ export function reconciliationJobId(target: ReconciliationTarget): string {
  * pass a fresh id, and because the base is recomputed from the target rather than chained off the
  * current id, repeated re-arms stay finite.
  */
-export function reArmedJobId(target: ReconciliationTarget, runAt: string): string {
-  return `${reconciliationJobId(target)}@${runAt}`;
+export function reArmedJobId(
+  unit: "reconcile.orders" | "reconcile.stock",
+  target: ReconciliationTarget,
+  runAt: string
+): string {
+  return `${reconcileJobIdFor(unit, target)}@${runAt}`;
 }
 
 export class ReconciliationScheduler {
@@ -82,8 +104,9 @@ export class ReconciliationScheduler {
    */
   async arm(): Promise<void> {
     const now = (this.#options.now ?? ((): Date => new Date()))();
+    const stockCapable = this.#options.stockCapableChannels ?? ((): boolean => false);
     for (const target of this.#options.targets) {
-      const result = await this.#options.queue.enqueue(
+      const orderResult = await this.#options.queue.enqueue(
         "reconcile.orders",
         target.tenantId,
         target.channel,
@@ -93,7 +116,26 @@ export class ReconciliationScheduler {
       this.#options.logger.info("reconcile.armed", {
         tenantId: target.tenantId,
         channel: target.channel,
-        deduped: result.deduped
+        unit: "reconcile.orders",
+        deduped: orderResult.deduped
+      });
+
+      // Only a channel whose connector can report stock gets a stock pass. Arming one for a channel
+      // that cannot would enqueue a walk whose first page throws on the capability check, which is
+      // budget spent on a job that can never succeed (docs/adr/0015).
+      if (!stockCapable(target.channel)) continue;
+      const stockResult = await this.#options.queue.enqueue(
+        "reconcile.stock",
+        target.tenantId,
+        target.channel,
+        {},
+        { jobId: stockReconciliationJobId(target), runAt: now.toISOString() }
+      );
+      this.#options.logger.info("reconcile.armed", {
+        tenantId: target.tenantId,
+        channel: target.channel,
+        unit: "reconcile.stock",
+        deduped: stockResult.deduped
       });
     }
   }

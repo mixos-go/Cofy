@@ -13,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createLogger } from "@platform/observability";
 import type { LogLevel } from "@platform/observability";
+import type { ChannelCode } from "@platform/contracts";
 import { InMemoryMedusaAdminKeyStore } from "@platform/secrets";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import {
@@ -137,7 +138,31 @@ async function main(): Promise<void> {
 
   const intervalSeconds = readReconciliationInterval();
   const targets = parseReconciliationTargets(process.env.RECONCILIATION_TARGETS);
-  const scheduler = new ReconciliationScheduler({ queue, targets, intervalSeconds, logger });
+
+  // Ask the integration plane which channels can report stock, once at startup, so a stock pass is
+  // armed only where the connector implements it (docs/adr/0015). A probe failure is not fatal: it
+  // leaves the stock set empty and order reconciliation still arms, which is the safer default. The
+  // answer is cached because capabilities are a property of the app registration, not of a connection.
+  const stockCapable = new Map<ChannelCode, boolean>();
+  for (const channel of new Set(targets.map((target) => target.channel))) {
+    try {
+      stockCapable.set(channel, (await gateway.capabilities({ channel })).supportsStockSnapshotRead);
+    } catch (error) {
+      logger.warn("startup.capability_probe_failed", {
+        channel,
+        errorMessage: error instanceof Error ? error.message : "unknown"
+      });
+      stockCapable.set(channel, false);
+    }
+  }
+
+  const scheduler = new ReconciliationScheduler({
+    queue,
+    targets,
+    intervalSeconds,
+    logger,
+    stockCapableChannels: (channel) => stockCapable.get(channel) === true
+  });
 
   const handlers = createWorkflowHandlers({
     syncState: controlPlane,

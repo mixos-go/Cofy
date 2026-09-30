@@ -228,6 +228,33 @@ test("reconcile.orders runs the same pull and re-arms itself on the cadence", as
   );
 });
 
+test("reconcile.stock repairs through the push path and re-arms on the cadence", async () => {
+  const h = harness();
+  await mapSku(h);
+  h.commerce.withVariant("SKU-1", "var-1", 5);
+  h.gateway.withStockPage("shopee:start", {
+    items: [{ channel: CHANNEL, externalSkuId: "model-11", sku: "SKU-1", available: 2 }],
+    nextCursor: null
+  });
+
+  const outcome = await dispatchJob(
+    job({ unit: "reconcile.stock", jobId: "reconcile.stock:tnt-a:shopee" }),
+    h.handlers,
+    h.queue,
+    silent
+  );
+
+  assert.equal(outcome.result, "completed");
+  assert.equal(h.gateway.pushCalls.length, 1, "the mismatch was repaired through the ordinary push");
+  assert.equal(h.gateway.pushCalls[0]!.items[0]!.available, 5, "the local value is what was pushed");
+  const next = new Date(NOW.getTime() + 60_000).toISOString();
+  assert.equal(
+    h.queue.runAtOf(`reconcile.stock:tnt-a:shopee@${next}`),
+    next,
+    "the stock pass re-armed itself on the same cadence as order reconciliation"
+  );
+});
+
 test("a crash mid-pass is a non-event: the resumed pass re-reads from the committed cursor", async () => {
   const h = harness();
   // Two pages. The first commits, then the gateway throws — the shape of a worker dying mid-pass.

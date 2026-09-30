@@ -96,7 +96,11 @@ async function credentialFor(
 
 async function requireCapability(
   connector: ChannelConnector,
-  capability: "supportsOrderPull" | "supportsListingRead" | "supportsStockPush"
+  capability:
+    | "supportsOrderPull"
+    | "supportsListingRead"
+    | "supportsStockPush"
+    | "supportsStockSnapshotRead"
 ): Promise<void> {
   // A connector declares what it can do (AGENTS.md §4). Calling past a `false` would either throw
   // from the connector or, worse, look like an empty success; refusing here makes it a clear error.
@@ -322,6 +326,35 @@ export function createRoutes(
           connector.pushStock(parsed.items, credential)
         );
         return { results };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/channels/:channel/capabilities",
+      auth: { kind: "service" },
+      handler: async ({ params }) => {
+        // Read-only and credential-free: what a connector can do is a property of the platform's
+        // app registration, not of one seller's connection (docs/adr/0003). The worker uses this to
+        // decide which reconciliation passes a channel is worth arming (docs/adr/0015).
+        const channel = channelParam(params);
+        return { channel, capabilities: registry.require(channel).capabilities() };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/channels/:channel/stock-snapshot/page",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = pageBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsStockSnapshotRead");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const page = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.fetchStockSnapshot({ value: parsed.cursor }, credential)
+        );
+        return { items: page.items, nextCursor: page.next.value };
       }
     }
   ];

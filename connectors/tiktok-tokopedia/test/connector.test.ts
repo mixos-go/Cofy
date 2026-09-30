@@ -378,7 +378,8 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     supportsWebhooks: false,
     supportsOrderAcknowledgement: false,
     splitsOrderHistory: true,
-    supportsListingRead: true
+    supportsListingRead: true,
+    supportsStockSnapshotRead: true
   });
 });
 
@@ -482,6 +483,65 @@ test("fetchListings returns a resumable cursor while a page token remains", asyn
   assert.notEqual(page.next.value, null);
   // The cursor must round-trip: the connector only ever reads back what it wrote.
   const resumed = await connector.fetchListings(page.next, credential);
+  assert.equal(resumed.items.length, 1);
+});
+
+test("fetchStockSnapshot reports the level each SKU holds, keyed by the seller SKU", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(
+      transport([
+        {
+          code: 0,
+          data: {
+            products: [
+              {
+                id: "p1",
+                skus: [
+                  { id: "s1", seller_sku: "SKU-1", inventory: [{ warehouse_id: "w1", quantity: 3 }] },
+                  { id: "s2", seller_sku: "SKU-2", inventory: [{ warehouse_id: "w1", quantity: 0 }] }
+                ]
+              }
+            ],
+            next_page_token: ""
+          }
+        }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchStockSnapshot({ value: null }, credential);
+
+  assert.deepEqual(page.items, [
+    { channel: "tiktok_tokopedia", externalSkuId: "s1", sku: "SKU-1", available: 3 },
+    { channel: "tiktok_tokopedia", externalSkuId: "s2", sku: "SKU-2", available: 0 }
+  ]);
+  assert.equal(page.next.value, null);
+});
+
+test("fetchStockSnapshot keeps a SKU the marketplace did not name as uncomparable", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(transport([{ code: 0, data: { products: [{ id: "p1", skus: [{ id: "s1" }] }] } }]).fetch)
+  );
+
+  const page = await connector.fetchStockSnapshot({ value: null }, credential);
+
+  assert.equal(page.items[0]?.sku, null);
+});
+
+test("fetchStockSnapshot returns a resumable cursor while a page token remains", async () => {
+  const connector = new TikTokConnector(
+    makeConfig(
+      transport([
+        { code: 0, data: { products: [{ id: "p1", skus: [{ id: "s1", seller_sku: "SKU-1" }] }], next_page_token: "tok-2" } }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchStockSnapshot({ value: null }, credential);
+
+  assert.notEqual(page.next.value, null);
+  // The cursor must round-trip: the connector only ever reads back what it wrote.
+  const resumed = await connector.fetchStockSnapshot(page.next, credential);
   assert.equal(resumed.items.length, 1);
 });
 

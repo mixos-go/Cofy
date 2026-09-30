@@ -27,7 +27,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/repair and dashboard done for order refs; restart resume proven on real Redis; stock snapshot pull and retention remain | M3 |
+| M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -479,8 +479,10 @@ boundary", not "shipped".
   idempotency lease or a healthy in-flight attempt is reclassified as drift — a relationship the
   code documents but does not enforce, because both are deployment inputs. Detection reads at most
   `MAX_DRIFT_REFS_PER_PASS` refs per kind per pass, so a tenant with more drift than the bound
-  converges over several passes. Stock drift is not covered yet, because the stock snapshot pull it
-  would need is still open.
+  converges over several passes. Stock drift is covered by ADR 0015: `reconcile.stock` compares each
+  channel-reported level to Medusa's current value and repairs a mismatch by pushing the local value,
+  while a level with no SKU or for a SKU the tenant does not sell is counted uncomparable rather than
+  drift, so the count stays clearable.
 - The stock-push idempotency key is a digest of the pushed payload. That makes an unchanged re-push
   a replay and a changed value a new operation (both tested), but it also means two *different*
   channels' pushes are separate keys by construction, and a partially-rejected batch is recorded as
@@ -509,7 +511,8 @@ the engine: the M3 workflow functions are registered as units, a `CHANNEL_RATE_L
 with the governor's `Retry-After` (closing M3's open item), and `reconcile.orders` converges through
 the same pull path on a cadence that lives in the queue. Drift detection, classification and repair
 are now wired (order refs), with the control-plane dashboard read, and the mid-pass restart resume is
-proven over a real Redis queue; what remains is the stock snapshot pull and retention.
+proven over a real Redis queue; ADR 0015 adds the stock snapshot pull and stock drift repair, so both
+entities now converge. What remains is the retention policy.
 
 **Deliverables**
 
@@ -542,6 +545,14 @@ proven over a real Redis queue; what remains is the stock snapshot pull and rete
   the cadence survives a restart instead of living in a timer (AGENTS.md §2.5). *(Done: the unit calls
   the same `importOrdersOnce` as the real-time path — no second repair code path (ADR 0002). Evidence:
   `apps/services/worker/test/reconcile.test.ts` and the `reconcile.orders` case in `units.test.ts`.)*
+- **[x] Stock snapshot pull and drift repair (ADR 0015).** *(Done: `fetchStockSnapshot` /
+  `supportsStockSnapshotRead` join the connector contract (Shopee and TikTok implemented);
+  `reconcile.stock` walks the channel's snapshot, compares each level to Medusa's `GET
+  /admin/stock-levels`, and repairs a mismatch by pushing the *local* value through the same
+  `pushStockOnce` the real-time path uses. A level with no seller SKU, or for a SKU the tenant does not
+  sell, is counted as uncomparable and never repaired, so the drift count can return to zero. Evidence:
+  `apps/services/worker/test/stock-reconcile.test.ts`, the `reconcile.stock` case in `units.test.ts`,
+  and the connector snapshot cases in `connectors/*/test/connector.test.ts`.)*
 - **[x] Drift detection: compare pulled state against local state, classify drift type.** *(Done:
   `classifyOrderRefDrift` / `orderRefsToDrift` in `packages/contracts` classify a ref as
   `failed_import` or `stale_reservation` from its own state, shared by the worker's pass and the
@@ -581,13 +592,16 @@ proven over a real Redis queue; what remains is the stock snapshot pull and rete
 
 **Exit criteria**
 
-- [~] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
+- [x] Reconciliation converges orders and stock within the SLO using the pull path alone (webhooks
       are not required, so this is the normal case today, not a degraded mode). *Orders converge
-      today; the stock snapshot pull is still open, so this is partial.*
-- [~] Injected drift (delete a local order, corrupt a stock level) is detected and repaired. *Order
+      through `reconcile.orders`; stock converges through `reconcile.stock`, which walks the channel's
+      snapshot and pushes the local value back for any level that disagrees (ADR 0015).*
+- [x] Injected drift (delete a local order, corrupt a stock level) is detected and repaired. *Order
       drift is covered end to end: a failed or stale ref is classified, repaired through the pull, and
-      the re-count returns to zero (`apps/services/worker/test/drift.test.ts`). Stock drift is not yet
-      covered, because the stock snapshot pull it needs is still open.*
+      the re-count returns to zero (`apps/services/worker/test/drift.test.ts`). Stock drift is covered
+      the same way: a channel level that disagrees with Medusa is detected, repaired through the
+      ordinary push with the local value, and a second pass reads zero drift
+      (`apps/services/worker/test/stock-reconcile.test.ts`).*
 - [x] Reconciliation respects the rate-limit budget and never starves real-time operations. *(A
       refusal defers the unit with the governor's `Retry-After` instead of failing it, and the queue
       carries no second limiter, so there is one budget — ADR 0013.)*

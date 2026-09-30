@@ -4,6 +4,7 @@ import { defineMiddlewares } from "@medusajs/framework/http";
 import {
   CreateOrderSchema,
   FindChannelOrderLinkSchema,
+  ListStockLevelsSchema,
   ListVariantsSchema,
   ReleaseOrderSchema
 } from "./admin/validators.ts";
@@ -37,6 +38,11 @@ export default defineMiddlewares({
       matcher: "/admin/variants",
       methods: ["GET"],
       middlewares: [validateAndTransformQuery(ListVariantsSchema, {})]
+    },
+    {
+      matcher: "/admin/stock-levels",
+      methods: ["GET"],
+      middlewares: [validateAndTransformQuery(ListStockLevelsSchema, {})]
     },
     {
       matcher: "/admin/channel-order-links",

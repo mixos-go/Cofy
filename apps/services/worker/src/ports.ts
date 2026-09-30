@@ -15,9 +15,11 @@
 import { PlatformError, isRetryable } from "@platform/contracts";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
+  ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
+  ChannelStockLevel,
   IdempotencyClaim,
   OrderId,
   StockResult,
@@ -114,6 +116,12 @@ export interface SyncStateClient {
 
 /** One page or one batch against the integration plane. The plane owns the marketplace. */
 export interface ChannelGateway {
+  /**
+   * What the channel's connector can do. Read once at startup to decide which reconciliation passes
+   * are worth arming, so a channel that cannot report stock is not walked every cadence (ADR 0015).
+   */
+  capabilities(input: { readonly channel: ChannelCode }): Promise<ChannelCapabilities>;
+
   fetchOrders(input: {
     readonly tenantId: TenantId;
     readonly channel: ChannelCode;
@@ -126,6 +134,16 @@ export interface ChannelGateway {
     readonly cursor: string | null;
   }): Promise<{ readonly items: readonly ChannelListing[]; readonly nextCursor: string | null }>;
 
+  /**
+   * Pull a page of the channel's current stock levels (docs/adr/0015). The comparison this feeds is
+   * what makes a corrupted level detectable.
+   */
+  fetchStockSnapshot(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly cursor: string | null;
+  }): Promise<{ readonly items: readonly ChannelStockLevel[]; readonly nextCursor: string | null }>;
+
   pushStock(input: {
     readonly tenantId: TenantId;
     readonly channel: ChannelCode;
@@ -137,6 +155,17 @@ export interface ChannelGateway {
 export interface MedusaVariant {
   readonly variantId: string;
   readonly sku: string | null;
+}
+
+/**
+ * A variant's available stock in the tenant's Medusa, resolved by our own SKU (docs/adr/0015).
+ *
+ * This is the local side of the stock comparison. A SKU the tenant does not sell, or a variant that
+ * does not manage inventory, is simply absent from the result — "not comparable", not zero.
+ */
+export interface MedusaStockLevel {
+  readonly sku: string;
+  readonly available: number;
 }
 
 /**
@@ -205,6 +234,18 @@ export interface CommerceClient {
     readonly orderId: OrderId;
     readonly reason: string;
   }): Promise<void>;
+
+  /**
+   * The tenant's available stock for a set of SKUs (docs/adr/0015).
+   *
+   * The local half of the stock comparison. Like `resolveVariantsBySku`, a SKU the tenant does not
+   * sell is absent from the result rather than zero, so "unknown to us" stays distinguishable from
+   * "none left".
+   */
+  listStockLevels(input: {
+    readonly tenantId: TenantId;
+    readonly skus: readonly string[];
+  }): Promise<readonly MedusaStockLevel[]>;
 }
 
 interface HttpOptions {
@@ -412,6 +453,13 @@ export class HttpChannelGateway implements ChannelGateway {
     });
   }
 
+  async capabilities(input: { readonly channel: ChannelCode }) {
+    const body = (await this.#post(`/v1/channels/${input.channel}/capabilities`, {})) as {
+      readonly capabilities: ChannelCapabilities;
+    };
+    return body.capabilities;
+  }
+
   async fetchOrders(input: {
     readonly tenantId: TenantId;
     readonly channel: ChannelCode;
@@ -432,6 +480,17 @@ export class HttpChannelGateway implements ChannelGateway {
       tenantId: input.tenantId,
       cursor: input.cursor
     })) as { readonly items: readonly ChannelListing[]; readonly nextCursor: string | null };
+  }
+
+  async fetchStockSnapshot(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly cursor: string | null;
+  }) {
+    return (await this.#post(`/v1/channels/${input.channel}/stock-snapshot/page`, {
+      tenantId: input.tenantId,
+      cursor: input.cursor
+    })) as { readonly items: readonly ChannelStockLevel[]; readonly nextCursor: string | null };
   }
 
   async pushStock(input: {
@@ -522,6 +581,15 @@ export class HttpCommerceClient implements CommerceClient {
       method: "POST",
       body: JSON.stringify({ reason: input.reason })
     });
+  }
+
+  async listStockLevels(input: { readonly tenantId: TenantId; readonly skus: readonly string[] }) {
+    const query = new URLSearchParams();
+    for (const sku of input.skus) query.append("sku", sku);
+    const body = (await this.#request(input.tenantId, `/admin/stock-levels?${query.toString()}`, {
+      method: "GET"
+    })) as { readonly levels: readonly MedusaStockLevel[] };
+    return body.levels;
   }
 }
 

@@ -20,6 +20,7 @@ import type {
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
+  ChannelStockLevel,
   Cursor,
   Instant,
   Page,
@@ -456,6 +457,94 @@ export class ShopeeConnector implements ChannelConnector {
   }
 
   /**
+   * Read the stock level of every active item's models (docs/adr/0015).
+   *
+   * The walk is the listing walk: `get_item_list` pages by offset, and each item's models come from
+   * `get_model_list`, which carries `stock_info_v2.summary_info.total_available_stock`. The same
+   * item-level SKU fallback as the listing read applies, so a single-variant item whose SKU lives on
+   * the item still compares.
+   */
+  async fetchStockSnapshot(cursor: Cursor, credential: Credential): Promise<Page<ChannelStockLevel>> {
+    const offset = cursor.value === null || cursor.value === "" ? 0 : this.listingOffset(cursor);
+    const client = this.clientFor(credential);
+    try {
+      const list = asResponseBody<ShopeeItemListResponse>(
+        await client.product.getItemList({
+          offset,
+          page_size: this.config.pageSize,
+          item_status: ["NORMAL"]
+        })
+      );
+      assertNoErrorBody(list, "fetchStockSnapshot/getItemList");
+
+      const summaries = list.response?.item ?? [];
+      const levels = await this.fetchStockLevels(client, summaries);
+
+      const hasNext = list.response?.has_next_page === true;
+      const nextOffset = list.response?.next_offset;
+      const next: Cursor =
+        hasNext && typeof nextOffset === "number"
+          ? { value: JSON.stringify({ offset: nextOffset }) }
+          : { value: null }; // caught up (AGENTS.md §9)
+
+      return { items: levels, next };
+    } catch (error) {
+      throw toPlatformError(error, "fetchStockSnapshot");
+    }
+  }
+
+  private async fetchStockLevels(
+    client: Shopee,
+    summaries: readonly { item_id?: number }[]
+  ): Promise<ChannelStockLevel[]> {
+    const ids = summaries.map((item) => item.item_id).filter((id): id is number => typeof id === "number");
+    if (ids.length === 0) return [];
+
+    const baseInfo = new Map<number, string>();
+    for (let index = 0; index < ids.length; index += this.config.detailBatchSize) {
+      const batch = ids.slice(index, index + this.config.detailBatchSize);
+      const info = asResponseBody<ShopeeItemBaseInfoResponse>(
+        await client.product.getItemBaseInfo({ item_id_list: batch })
+      );
+      assertNoErrorBody(info, "fetchStockSnapshot/getItemBaseInfo");
+      for (const entry of info.response?.item_list ?? []) {
+        if (typeof entry.item_id === "number" && entry.item_sku !== undefined) {
+          baseInfo.set(entry.item_id, entry.item_sku);
+        }
+      }
+    }
+
+    const levels: ChannelStockLevel[] = [];
+    for (const summary of summaries) {
+      const itemId = summary.item_id;
+      if (typeof itemId !== "number") continue;
+
+      const models = asResponseBody<ShopeeModelListResponse>(
+        await client.product.getModelList({ item_id: itemId })
+      );
+      assertNoErrorBody(models, "fetchStockSnapshot/getModelList");
+
+      const itemSku = baseInfo.get(itemId);
+      for (const model of models.response?.model ?? []) {
+        if (typeof model.model_id !== "number") {
+          throw new PlatformError("UPSTREAM_ERROR", `Shopee item ${itemId} has a model without an id.`);
+        }
+        const modelSku = model.model_sku !== undefined && model.model_sku !== "" ? model.model_sku : null;
+        levels.push({
+          channel: this.channel,
+          externalSkuId: String(model.model_id),
+          sku: modelSku ?? (itemSku !== undefined && itemSku !== "" ? itemSku : null),
+          // Shopee omits the field on some items rather than sending zero. Absent is read as zero
+          // because a model with no reported stock is not sellable, and treating it as uncomparable
+          // would hide a real out-of-stock drift.
+          available: model.stock_info_v2?.summary_info?.total_available_stock ?? 0
+        });
+      }
+    }
+    return levels;
+  }
+
+  /**
    * `get_item_list` returns ids and status only, so each item's SKUs are read through
    * `get_model_list` in bounded batches, and the item-level seller SKU from `get_item_base_info`.
    * This is the same two-read shape the order path uses.
@@ -527,7 +616,9 @@ export class ShopeeConnector implements ChannelConnector {
       supportsWebhooks: true,
       supportsOrderAcknowledgement: false,
       splitsOrderHistory: false,
-      supportsListingRead: true
+      supportsListingRead: true,
+      // `get_model_list` carries `stock_info_v2`, so a snapshot is a real read (docs/adr/0015).
+      supportsStockSnapshotRead: true
     };
   }
 

@@ -10,9 +10,11 @@
 
 import type { InMemorySyncStateStore } from "@platform/sync-state";
 import type {
+  ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
+  ChannelStockLevel,
   StockResult,
   StockUpdate,
   TenantId
@@ -21,6 +23,7 @@ import { PlatformError } from "@platform/contracts";
 import type {
   ChannelGateway,
   CommerceClient,
+  MedusaStockLevel,
   MedusaVariant,
   SyncStateClient
 } from "../src/ports.ts";
@@ -66,6 +69,7 @@ type OrderPage = { readonly items: readonly ChannelOrder[]; readonly nextCursor:
 export class FakeChannelGateway implements ChannelGateway {
   readonly #orderPages = new Map<string, OrderPage>();
   readonly #listingPages = new Map<string, { items: readonly ChannelListing[]; nextCursor: string | null }>();
+  readonly #stockPages = new Map<string, { items: readonly ChannelStockLevel[]; nextCursor: string | null }>();
   #pagesRead = 0;
   readonly pushCalls: { tenantId: TenantId; channel: ChannelCode; items: readonly StockUpdate[] }[] = [];
   pushResults: ReadonlyMap<string, StockResult> = new Map();
@@ -93,6 +97,26 @@ export class FakeChannelGateway implements ChannelGateway {
   withListingPage(key: string, page: { items: readonly ChannelListing[]; nextCursor: string | null }): this {
     this.#listingPages.set(key, page);
     return this;
+  }
+
+  withStockPage(key: string, page: { items: readonly ChannelStockLevel[]; nextCursor: string | null }): this {
+    this.#stockPages.set(key, page);
+    return this;
+  }
+
+  /** What the fake reports for a channel. Defaults to a channel that can do everything we read. */
+  capabilitiesFor: (channel: ChannelCode) => ChannelCapabilities = () => ({
+    supportsOrderPull: true,
+    supportsStockPush: true,
+    supportsWebhooks: true,
+    supportsOrderAcknowledgement: false,
+    splitsOrderHistory: false,
+    supportsListingRead: true,
+    supportsStockSnapshotRead: true
+  });
+
+  async capabilities(input: { readonly channel: ChannelCode }): Promise<ChannelCapabilities> {
+    return this.capabilitiesFor(input.channel);
   }
 
   async fetchOrders(input: {
@@ -125,6 +149,15 @@ export class FakeChannelGateway implements ChannelGateway {
   }) {
     const key = `${input.channel}:${input.cursor ?? "start"}`;
     return this.#listingPages.get(key) ?? { items: [], nextCursor: null };
+  }
+
+  async fetchStockSnapshot(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly cursor: string | null;
+  }) {
+    const key = `${input.channel}:${input.cursor ?? "start"}`;
+    return this.#stockPages.get(key) ?? { items: [], nextCursor: null };
   }
 
   async pushStock(input: {
@@ -240,5 +273,17 @@ export class FakeCommerceClient implements CommerceClient {
       }
     }
     this.released.push(input.orderId);
+  }
+
+  async listStockLevels(input: { readonly tenantId: TenantId; readonly skus: readonly string[] }) {
+    const levels: MedusaStockLevel[] = [];
+    for (const sku of input.skus) {
+      const variantId = this.catalogue.get(sku);
+      // Absent SKU is absent from the result, not zero: the comparison must be able to tell
+      // "we do not sell this" from "none left" (docs/adr/0015).
+      if (variantId === undefined) continue;
+      levels.push({ sku, available: this.stock.get(variantId) ?? 0 });
+    }
+    return levels;
   }
 }

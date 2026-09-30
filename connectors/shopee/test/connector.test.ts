@@ -345,7 +345,8 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     supportsWebhooks: true,
     supportsOrderAcknowledgement: false,
     splitsOrderHistory: false,
-    supportsListingRead: true
+    supportsListingRead: true,
+    supportsStockSnapshotRead: true
   });
 });
 
@@ -447,6 +448,68 @@ test("fetchListings returns a resumable offset while Shopee reports another page
 
   const second = await connector.fetchListings(first.next, credential);
   assert.equal(second.items[0]?.externalProductId, "1002");
+  assert.equal(second.next.value, null);
+});
+
+test("fetchStockSnapshot reports the level each model holds, keyed by the seller SKU", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL" }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_sku: "SKU-1" }] } },
+        {
+          error: "",
+          response: {
+            model: [
+              { model_id: 11, model_sku: "SKU-1", stock_info_v2: { summary_info: { total_available_stock: 4 } } }
+            ]
+          }
+        }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchStockSnapshot({ value: null }, credential);
+
+  assert.deepEqual(page.items, [{ channel: "shopee", externalSkuId: "11", sku: "SKU-1", available: 4 }]);
+  assert.equal(page.next.value, null);
+});
+
+test("fetchStockSnapshot reads an omitted stock field as zero, not as uncomparable", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL" }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_sku: "SKU-1" }] } },
+        { error: "", response: { model: [{ model_id: 11, model_sku: "SKU-1" }] } }
+      ]).fetch
+    )
+  );
+
+  const page = await connector.fetchStockSnapshot({ value: null }, credential);
+
+  assert.equal(page.items[0]?.available, 0);
+});
+
+test("fetchStockSnapshot returns a resumable offset while Shopee reports another page", async () => {
+  const connector = new ShopeeConnector(
+    makeConfig(
+      transport([
+        { error: "", response: { item: [{ item_id: 1001, item_status: "NORMAL" }], has_next_page: true, next_offset: 50 } },
+        { error: "", response: { item_list: [{ item_id: 1001, item_sku: "SKU-1" }] } },
+        { error: "", response: { model: [{ model_id: 11, model_sku: "SKU-1", stock_info_v2: { summary_info: { total_available_stock: 1 } } }] } },
+        { error: "", response: { item: [{ item_id: 1002, item_status: "NORMAL" }], has_next_page: false } },
+        { error: "", response: { item_list: [{ item_id: 1002, item_sku: "SKU-2" }] } },
+        { error: "", response: { model: [{ model_id: 12, model_sku: "SKU-2", stock_info_v2: { summary_info: { total_available_stock: 2 } } }] } }
+      ]).fetch
+    )
+  );
+
+  const first = await connector.fetchStockSnapshot({ value: null }, credential);
+  assert.notEqual(first.next.value, null);
+  const second = await connector.fetchStockSnapshot(first.next, credential);
+
+  assert.deepEqual(second.items.map((item) => [item.sku, item.available]), [["SKU-2", 2]]);
   assert.equal(second.next.value, null);
 });
 

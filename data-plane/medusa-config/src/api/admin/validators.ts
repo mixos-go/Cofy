@@ -57,6 +57,11 @@ export const ListVariantsSchema = z.object({
   sku: z.union([z.string(), z.array(z.string())]).transform((value) => (Array.isArray(value) ? value : [value]))
 });
 
+/** `?sku=a&sku=b` for the stock read; same shape as the variant lookup, same reason. */
+export const ListStockLevelsSchema = z.object({
+  sku: z.union([z.string(), z.array(z.string())]).transform((value) => (Array.isArray(value) ? value : [value]))
+});
+
 export const FindChannelOrderLinkSchema = z.object({
   channel: z.string().min(1),
   externalOrderId: z.string().min(1)
