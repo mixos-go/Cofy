@@ -19,7 +19,7 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS } from "@platform/contracts";
+import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, asChannelCode } from "@platform/contracts";
 import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
@@ -445,21 +445,29 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
 /**
  * `channel` and `entity` are read from the body but not constrained by the zod object above, so a
  * bad value becomes a clear 422 rather than silently narrowing to the wrong channel.
+ *
+ * Both are checked against the contract's own list rather than a copy of it. A hand-written copy is
+ * what let `stock` be missing here after `SYNC_ENTITIES` gained it: the worker's stock reconciliation
+ * could read its cursor but not advance it, so its pass failed on the first page and, because a unit
+ * re-arms only when it completes, it never ran again. Deriving the check means a new member is
+ * accepted the moment it is declared.
  */
 function channelFromBody(body: unknown): ChannelCode {
   const channel = (body as { channel?: unknown }).channel;
-  if (channel !== "tiktok_tokopedia" && channel !== "shopee" && channel !== "lazada") {
+  const known = typeof channel === "string" ? asChannelCode(channel) : null;
+  if (known === null) {
     throw new PlatformError("VALIDATION_FAILED", "A known channel is required.", { details: { channel } });
   }
-  return channel;
+  return known;
 }
 
 function entityFromBody(body: unknown): SyncEntity {
   const entity = (body as { entity?: unknown }).entity;
-  if (entity !== "orders" && entity !== "listings") {
+  const known = (SYNC_ENTITIES as readonly string[]).includes(entity as string) ? (entity as SyncEntity) : null;
+  if (known === null) {
     throw new PlatformError("VALIDATION_FAILED", "A known sync entity is required.", { details: { entity } });
   }
-  return entity;
+  return known;
 }
 
 function channelParam(params: Readonly<Record<string, string>>): ChannelCode {
