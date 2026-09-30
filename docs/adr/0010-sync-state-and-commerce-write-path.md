@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (approved 2026-09-26 — touches tenant data access)
 - **Date:** 2026-09-26
-- **Deciders:** Platform engineering
+- **Deciders:** Cofy platform engineering
 
 > Approval note: accepted as-is. The worker now writes through a tenant's Medusa Admin API and the
 > control plane owns sync state; `data-plane/modules/channel-order-link` is unblocked and is the

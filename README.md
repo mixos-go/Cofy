@@ -1,15 +1,15 @@
-# Omnichannel OMS/WMS Platform
+# Cofy
 
-A multi-tenant omnichannel Order Management System (OMS) and Warehouse Management System (WMS)
-for the Indonesian market. Sellers connect their marketplace shops; we handle order aggregation,
-stock synchronization, and fulfillment.
+Cofy is a multi-tenant omnichannel Order Management System (OMS) and Warehouse Management System
+(WMS) for the Indonesian market. Sellers connect their marketplace shops; Cofy handles order
+aggregation, stock synchronization, and fulfillment.
 
-**We are the platform company.** Sellers only perform a "connect shop" action — they never deal
+**Cofy is the platform company.** Sellers only perform a "connect shop" action — they never deal
 with developer accounts, app keys, or APIs.
 
 ## Architecture at a glance
 
-Medusa v2 is the tenant data plane. It is used **vanilla** and is never forked. Our value lives
+Medusa v2 is the tenant data plane. It is used **vanilla** and is never forked. Cofy's value lives
 in the control plane (tenancy, provisioning) and the integration plane (marketplace connectors).
 
 - Tenant isolation: one tenant = one vanilla Medusa instance + one Postgres schema.

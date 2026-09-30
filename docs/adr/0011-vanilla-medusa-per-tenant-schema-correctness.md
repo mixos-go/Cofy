@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-28 (amended 2026-09-28 with Defect 3, the TLS one)
-- **Deciders:** Platform team
+- **Deciders:** Cofy platform team
 
 ## Context
 

@@ -1,5 +1,8 @@
 # Architecture
 
+Cofy is a multi-tenant omnichannel OMS/WMS for the Indonesian market. This document is the layer
+map for the system.
+
 Companion documents: `AGENTS.md` (working contract), `docs/PLAN.md` (milestones),
 `docs/adr/` (decisions). Where this document and an ADR disagree, the ADR wins.
 

@@ -9,8 +9,8 @@
 
 ## 1. What we are building
 
-A multi-tenant omnichannel OMS/WMS SaaS platform for the Indonesian market. We are the
-**platform company**; sellers only perform a "connect shop" action.
+A multi-tenant omnichannel OMS/WMS SaaS platform for the Indonesian market, branded **Cofy**. We
+are the **platform company**; sellers only perform a "connect shop" action.
 
 - **Medusa v2 is the tenant data plane — always vanilla, never forked.**
 - Tenant isolation: **instance/schema-per-tenant**. See `docs/adr/0001`.

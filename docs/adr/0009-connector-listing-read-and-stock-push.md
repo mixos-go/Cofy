@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (approved 2026-09-26 — extends a frozen shared interface)
 - **Date:** 2026-09-26
-- **Deciders:** Platform engineering
+- **Deciders:** Cofy platform engineering
 
 > Approval note: accepted as-is. The `fetchListings` addition and the `ChannelListing` contract are
 > now part of the frozen interface; a channel's `supportsStockPush` flips to `true` only when both

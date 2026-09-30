@@ -1,5 +1,7 @@
 # Plan
 
+Cofy is a multi-tenant omnichannel OMS/WMS for the Indonesian market.
+
 Companion to `AGENTS.md` (working contract) and `docs/ARCHITECTURE.md` (layer map).
 This file is the **single source of truth for what we are building next**.
 

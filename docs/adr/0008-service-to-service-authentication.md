@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-26
-- **Deciders:** Platform engineering
+- **Deciders:** Cofy platform engineering
 
 ## Context
 

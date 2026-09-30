@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-27
-- **Deciders:** Platform team
+- **Deciders:** Cofy platform team
 
 ## Context
 

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted (approved 2026-09-28). Transport section amended the same day: payload signing rejected, and "the network is internal, so plaintext is fine" rejected — see Decision points 4 and 6.
 - **Date:** 2026-09-28
-- **Deciders:** Platform engineering
+- **Deciders:** Cofy platform engineering
 
 ## Context
 
