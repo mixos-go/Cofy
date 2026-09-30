@@ -382,6 +382,16 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   nothing exercised the seam — the mismatch would have surfaced as a 404 in production. When a client
   gains a method, pin its URL in a test against a fake transport (`test/ports.test.ts`), and keep the
   new client addressed like its siblings so the convention is the thing being copied.
+- **A validator that copies a contract list silently rejects the members added later.** The control
+  plane validated `entity` against a hand-written `orders`/`listings` pair. When M4 added `stock` to
+  `SYNC_ENTITIES`, the worker's stock reconciliation could still *read* its cursor — the read route
+  takes `entity` from the path and the param parser kept up — but every *advance* was a 422, so the
+  pass repaired its first page and then failed. A unit re-arms only when it completes, so stock
+  reconciliation never re-armed at all: it ran once at startup and stopped, while the drift count
+  never converged. Both test suites stayed green because the worker tests used
+  `InMemorySyncStateStore` and the route tests only ever sent `orders`. Derive the check from the
+  exported list (`SYNC_ENTITIES`, `asChannelCode`) and iterate that list in the test, so the next
+  member is covered the moment it is declared rather than when someone remembers.
 
 ---
 

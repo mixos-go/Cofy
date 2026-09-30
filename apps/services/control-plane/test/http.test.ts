@@ -25,6 +25,7 @@ import { TenantRegistry } from "../src/tenants.ts";
 import { createControlPlaneServer } from "../src/http.ts";
 import { InMemoryMedusaTargetStore } from "../src/medusa-target.ts";
 import { createLogger } from "../src/logging.ts";
+import { SYNC_ENTITIES } from "@platform/contracts";
 
 const GOOD_PASSWORD = "correct horse battery";
 const NOW = "2026-09-27T00:00:00.000Z";
@@ -471,6 +472,28 @@ test("the API", async (t) => {
       headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
     });
     assert.equal(bad.status, 422);
+  });
+
+  await t.test("every declared sync entity is accepted, so a new one cannot be rejected by a stale copy", async () => {
+    // The stock reconciliation reads its cursor and then advances it. When this surface validated
+    // `entity` against a hand-written list of two, the read worked and the advance was a 422, so the
+    // pass failed on page one and — because a unit re-arms only when it completes — never ran again.
+    // Iterating the contract's own list is what keeps this from recurring: a member added to
+    // SYNC_ENTITIES is exercised here automatically.
+    for (const entity of SYNC_ENTITIES) {
+      const set = await fetch(`${harness.baseUrl}/v1/sync/cursors/set`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${SERVICE_TOKEN}` },
+        body: JSON.stringify({ tenantId, channel: "shopee", entity, cursor: `tok-${entity}` })
+      });
+      assert.equal(set.status, 200, `setting the ${entity} cursor must be accepted`);
+
+      const get = await fetch(`${harness.baseUrl}/v1/sync/cursors/${tenantId}/shopee/${entity}`, {
+        headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+      });
+      const body = (await get.json()) as { cursor: { cursor: string | null } | null };
+      assert.equal(body.cursor?.cursor, `tok-${entity}`, `the ${entity} cursor must round-trip`);
+    }
   });
 
   await t.test("the drift dashboard counts a failed ref and returns to zero after a repair", async () => {
