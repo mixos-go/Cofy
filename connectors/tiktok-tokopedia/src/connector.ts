@@ -28,6 +28,7 @@ import type {
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
+  ChannelStockLevel,
   Cursor,
   Instant,
   Page,
@@ -495,6 +496,63 @@ export class TikTokConnector implements ChannelConnector {
   }
 
   /**
+   * Read the stock level of every SKU of every product (docs/adr/0015).
+   *
+   * `searchProducts` already carries each SKU's `inventory` entries, so the snapshot reuses the
+   * listing walk rather than calling `inventorySearch` per product: one cursor, one page shape, and
+   * no per-product fan-out against the shared budget. The warehouse pick matches the listing import
+   * — the first entry — so a snapshot compares the same location a push would write to.
+   */
+  async fetchStockSnapshot(cursor: Cursor, credential: Credential): Promise<Page<ChannelStockLevel>> {
+    const window = this.resolveListingCursor(cursor);
+    const client = this.clientFor(credential);
+    try {
+      const body: SearchProductsBody = {
+        update_time_ge: window.updateTimeGe,
+        update_time_le: window.updateTimeLt
+      };
+      const response = (await client.product.searchProducts(
+        { page_size: this.config.pageSize, page_token: window.pageToken === "" ? undefined : window.pageToken },
+        body
+      )) as TikTokSearchProductsResponse;
+      assertSuccess(response, "fetchStockSnapshot/searchProducts");
+
+      const levels: ChannelStockLevel[] = [];
+      for (const product of response.data?.products ?? []) {
+        const productId = product.id;
+        if (productId === undefined || productId === "") {
+          throw new PlatformError("UPSTREAM_ERROR", "TikTok returned a product without an id.");
+        }
+        for (const sku of product.skus ?? []) {
+          const skuId = sku.id;
+          if (skuId === undefined || skuId === "") {
+            throw new PlatformError("UPSTREAM_ERROR", `TikTok product ${productId} has a SKU without an id.`);
+          }
+          levels.push({
+            channel: this.channel,
+            externalSkuId: skuId,
+            sku: sku.seller_sku !== undefined && sku.seller_sku !== "" ? sku.seller_sku : null,
+            // A SKU with no inventory entry reports nothing, which is read as zero: TikTok would
+            // reject a push that assumes stock it never reported, and treating it as uncomparable
+            // would hide a genuine out-of-stock drift.
+            available: sku.inventory?.[0]?.quantity ?? 0
+          });
+        }
+      }
+
+      const nextToken = response.data?.next_page_token ?? "";
+      const next: Cursor =
+        nextToken === ""
+          ? { value: null } // caught up (AGENTS.md §9)
+          : { value: JSON.stringify({ ...window, pageToken: nextToken }) };
+
+      return { items: levels, next };
+    } catch (error) {
+      throw toPlatformError(error, "fetchStockSnapshot");
+    }
+  }
+
+  /**
    * No handlers, because TikTok's webhook signature scheme is not documented in the official OAS or
    * in the vendored SDK, and this connector will not ship a guessed one: a wrong verifier either
    * rejects legitimate push traffic or accepts forged traffic.
@@ -521,7 +579,9 @@ export class TikTokConnector implements ChannelConnector {
       supportsOrderAcknowledgement: false,
       // See the file header: search returns partial orders, detail fills them (docs/adr/0003).
       splitsOrderHistory: true,
-      supportsListingRead: true
+      supportsListingRead: true,
+      // `searchProducts` carries per-SKU `inventory`, so a snapshot is a real read (docs/adr/0015).
+      supportsStockSnapshotRead: true
     };
   }
 

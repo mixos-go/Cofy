@@ -16,6 +16,7 @@ import {
   parseReconciliationTargets,
   reconciliationJobId,
   reArmedJobId,
+  stockReconciliationJobId,
   ReconciliationScheduler
 } from "../src/reconcile.ts";
 
@@ -58,13 +59,23 @@ test("a non-positive interval is refused rather than becoming a busy loop", () =
 
 test("re-armed ids are fresh and finite, so the cadence is not absorbed by job-id dedupe", () => {
   const target = { tenantId: "tnt-a", channel: "shopee" as const };
-  const first = reArmedJobId(target, "2026-09-26T00:01:00.000Z");
-  const second = reArmedJobId(target, "2026-09-26T00:02:00.000Z");
+  const first = reArmedJobId("reconcile.orders", target, "2026-09-26T00:01:00.000Z");
+  const second = reArmedJobId("reconcile.orders", target, "2026-09-26T00:02:00.000Z");
   assert.notEqual(first, second, "a re-arm must not reuse the id of the pass doing the re-arming");
   // The base is recomputed from the target, not chained off the current id, so it stays finite.
   assert.ok(first.startsWith(reconciliationJobId(target)));
   assert.ok(second.startsWith(reconciliationJobId(target)));
   assert.equal(first.split("@").length, 2);
+});
+
+test("the stock pass gets its own job id, so the two passes cannot absorb each other", () => {
+  const target = { tenantId: "tnt-a", channel: "shopee" as const };
+  const runAt = "2026-09-26T00:01:00.000Z";
+  assert.notEqual(
+    reArmedJobId("reconcile.stock", target, runAt),
+    reArmedJobId("reconcile.orders", target, runAt)
+  );
+  assert.ok(reArmedJobId("reconcile.stock", target, runAt).startsWith(stockReconciliationJobId(target)));
 });
 
 test("parseReconciliationTargets accepts a tenant:channel list", () => {

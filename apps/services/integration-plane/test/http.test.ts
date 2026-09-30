@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import type { ChannelCapabilities, ChannelConnector, Credential } from "@platform/channel-sdk";
-import type { ChannelListing, ChannelOrder, Cursor, Page } from "@platform/contracts";
+import type { ChannelListing, ChannelOrder, ChannelStockLevel, Cursor, Page } from "@platform/contracts";
 import { RateLimitedError } from "@platform/contracts";
 import { RateLimitGovernor } from "@platform/rate-governor";
 import { createLogger } from "@platform/observability";
@@ -116,6 +116,19 @@ class RecordingConnector implements ChannelConnector {
       next: { value: null }
     };
   }
+  stockLevelsInPage = 0;
+  snapshotCapable = false;
+  async fetchStockSnapshot(): Promise<Page<ChannelStockLevel>> {
+    return {
+      items: Array.from({ length: this.stockLevelsInPage }, (_, i) => ({
+        channel: "tiktok_tokopedia" as const,
+        externalSkuId: `sku-${i}`,
+        sku: `SKU-${i}`,
+        available: i
+      })),
+      next: { value: null }
+    };
+  }
   webhookHandlers(): Readonly<Record<string, never>> {
     return {};
   }
@@ -126,7 +139,8 @@ class RecordingConnector implements ChannelConnector {
       supportsWebhooks: false,
       supportsOrderAcknowledgement: false,
       splitsOrderHistory: true,
-      supportsListingRead: true
+      supportsListingRead: true,
+      supportsStockSnapshotRead: this.snapshotCapable
     };
   }
 }
@@ -514,6 +528,69 @@ test("the listings page route returns the normalised variants the mapping needs"
     assert.equal(response.status, 200);
     const body = (await response.json()) as { items: { variants: { sku: string | null }[] }[] };
     assert.equal(body.items[0]?.variants[0]?.sku, "SKU-0");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the stock snapshot route returns the levels the comparison needs", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.snapshotCapable = true;
+    h.connector.stockLevelsInPage = 2;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/stock-snapshot/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { items: { sku: string | null }[]; nextCursor: string | null };
+    assert.equal(body.items.length, 2);
+    assert.equal(body.items[0]?.sku, "SKU-0");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the stock snapshot route refuses a channel that cannot report stock", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.snapshotCapable = false;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/stock-snapshot/page`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", cursor: null })
+    });
+
+    assert.equal(response.status, 422);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "VALIDATION_FAILED");
+  } finally {
+    await h.close();
+  }
+});
+
+test("the capabilities route reports what a connector can do without a stored credential", async () => {
+  const h = await startHarness();
+  try {
+    // Deliberately not connected: the worker asks before a seller has connected, so the answer must
+    // not depend on a credential (docs/adr/0015).
+    h.connector.snapshotCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/capabilities`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({})
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { capabilities: { supportsStockSnapshotRead: boolean } };
+    assert.equal(body.capabilities.supportsStockSnapshotRead, true);
   } finally {
     await h.close();
   }

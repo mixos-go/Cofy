@@ -11,7 +11,7 @@
 import type { ChannelCode, ExternalOrderId, Instant, OrderId, TenantId } from "./ids.ts";
 
 /** What a sync cursor is walking. One cursor per (tenant, channel, entity). */
-export const SYNC_ENTITIES = ["orders", "listings"] as const;
+export const SYNC_ENTITIES = ["orders", "listings", "stock"] as const;
 
 export type SyncEntity = (typeof SYNC_ENTITIES)[number];
 

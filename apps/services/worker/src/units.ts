@@ -35,6 +35,7 @@ import { importOrdersOnce } from "./order-import.ts";
 import type { EventPublisher } from "./order-import.ts";
 import { pushStockOnce } from "./stock-push.ts";
 import { repairDrift } from "./drift.ts";
+import { reconcileStockOnce } from "./stock-reconcile.ts";
 import { deferralFor } from "./rate-limit.ts";
 import { reArmedJobId } from "./reconcile.ts";
 import type { ChannelGateway, CommerceClient, SyncStateClient } from "./ports.ts";
@@ -208,7 +209,32 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
       if (result.kind === "completed") {
         const runAt = nextReconcileRunAt(now());
         await queue.schedule("reconcile.orders", job.tenantId, channel, {}, {
-          jobId: reArmedJobId({ tenantId: job.tenantId, channel }, runAt),
+          jobId: reArmedJobId("reconcile.orders", { tenantId: job.tenantId, channel }, runAt),
+          runAt
+        });
+      }
+      return result;
+    },
+
+    // Stock drift repair (docs/adr/0015). A different question from `reconcile.orders`: that unit
+    // asks "is any order missing", this one asks "does the channel's stock agree with Medusa". It
+    // shares the push the real-time path uses rather than reimplementing the write, and it walks its
+    // own cursor, so the two passes cannot disturb each other.
+    "reconcile.stock": async (job): Promise<WorkflowRunResult> => {
+      const channel = requireChannel(job);
+      const result = await runUnit(job, logger, now, async () => {
+        emptyPayload.parse(job.payload);
+        const outcome = await reconcileStockOnce(
+          { syncState, gateway, commerce, events, logger, now },
+          { tenantId: job.tenantId, channel }
+        );
+        logger.info("unit.reconcile.stock.completed", { tenantId: job.tenantId, channel, ...outcome });
+      });
+
+      if (result.kind === "completed") {
+        const runAt = nextReconcileRunAt(now());
+        await queue.schedule("reconcile.stock", job.tenantId, channel, {}, {
+          jobId: reArmedJobId("reconcile.stock", { tenantId: job.tenantId, channel }, runAt),
           runAt
         });
       }
@@ -222,5 +248,6 @@ export const REGISTERED_UNITS: readonly WorkflowUnit[] = [
   "order.import",
   "listing.import",
   "stock.push",
-  "reconcile.orders"
+  "reconcile.orders",
+  "reconcile.stock"
 ];

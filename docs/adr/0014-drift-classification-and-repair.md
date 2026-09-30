@@ -92,7 +92,10 @@ observability. No new metrics stack is introduced for M4.
 - `repaired` counts orders the pass imported, which can exceed the drift detected before it (the
   cursor may deliver new orders in the same walk). It is a repair-activity signal, not a delta of the
   drift count; `detected` and `remaining` are the pair that describes drift itself.
-- The stock snapshot pull is still open, so drift is defined for order refs only today.
+- The stock snapshot pull was open when this ADR was written, so drift is defined for order refs
+  here. ADR 0015 adds stock drift as a second kind, classified by its own shared pure function
+  (`classifyStockDrift`) and repaired through the ordinary push; this ADR's rule that the detector and
+  the dashboard cannot disagree extends to it unchanged.
 
 **How we would reverse this later:** if drift moves into a dedicated metrics pipeline, the classifier
 stays where it is and only the reporting call sites change. If repair needs to run independently of

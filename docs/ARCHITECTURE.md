@@ -93,10 +93,13 @@ plane and worker over HTTP with a service token — services never import each o
 Owns *executing work over time*.
 
 - Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
-- Runs the reconciliation scheduler: it seeds the first `reconcile.orders` pass per target and the
-  unit re-arms its own next run, so the cadence lives in the queue and survives a restart.
-- Runs drift detection and repair (`src/drift.ts`): `reconcile.orders` classifies order refs, repairs
-  through the ordinary pull, and logs the unresolved count (ADR 0014).
+- Runs the reconciliation scheduler: it seeds the first `reconcile.orders` and `reconcile.stock` pass
+  per capable target and each unit re-arms its own next run, so the cadence lives in the queue and
+  survives a restart.
+- Runs drift detection and repair: `reconcile.orders` (`src/drift.ts`) classifies order refs and
+  repairs through the ordinary pull (ADR 0014); `reconcile.stock` (`src/stock-reconcile.ts`) walks the
+  channel's stock snapshot, compares each level to Medusa, and repairs a mismatch by pushing the local
+  value through the ordinary push (ADR 0015). Both log their unresolved count.
 - Owns the workflow engine connection. *(The process starts the BullMQ consumer and requires
   `WORKFLOW_ENGINE_REDIS_URL`: no sync work runs without the engine, per AGENTS.md §2.5, so a worker
   that cannot reach Redis refuses to start rather than degrade to a timer.)*
@@ -228,7 +231,10 @@ never drift. The worker's repair pass (`src/drift.ts`) detects, runs `importOrde
 `retryFailedRefs` — the same pull the real-time path uses — and re-counts, so unresolved drift
 returns to zero only for orders the pull actually had. The control plane exposes the same count to
 the dashboard at `GET /v1/sync/drift/:tenantId/:channel`, so the number an operator reads is the
-number reconciliation acts on. Stock drift is not yet covered: the stock snapshot pull is open.
+number reconciliation acts on. Stock drift is covered by the same rule: `reconcile.stock` (ADR 0015)
+walks the channel's snapshot, compares each level to Medusa's `GET /admin/stock-levels`, and repairs a
+mismatch by pushing the local value back — so a stock level changed in a seller centre is found by
+reconciliation rather than by a customer.
 
 ## 4. Tenant isolation
 
