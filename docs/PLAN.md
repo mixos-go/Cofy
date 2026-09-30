@@ -27,7 +27,7 @@ This file is the **single source of truth for what we are building next**.
 | M2 | Channel connector: TikTok Shop + Tokopedia | Done | M1 |
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
-| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/repair and dashboard done for order refs; stock snapshot pull, real-Redis restart test, retention remain | M3 |
+| M4 | Reconciliation & drift repair | In progress — engine wired; drift classification/repair and dashboard done for order refs; restart resume proven on real Redis; stock snapshot pull and retention remain | M3 |
 | M5 | Seller OMS UI & operator console | Not started | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
@@ -508,8 +508,8 @@ both adapters — in-memory and Redis/BullMQ — passing one conformance suite, 
 the engine: the M3 workflow functions are registered as units, a `CHANNEL_RATE_LIMITED` is rescheduled
 with the governor's `Retry-After` (closing M3's open item), and `reconcile.orders` converges through
 the same pull path on a cadence that lives in the queue. Drift detection, classification and repair
-are now wired (order refs), with the control-plane dashboard read; what remains is the stock snapshot
-pull, a real-Redis restart test, and retention.
+are now wired (order refs), with the control-plane dashboard read, and the mid-pass restart resume is
+proven over a real Redis queue; what remains is the stock snapshot pull and retention.
 
 **Deliverables**
 
@@ -565,8 +565,16 @@ pull, a real-Redis restart test, and retention.
   stack is deliberately not added (ADR 0014). Evidence: the drift-dashboard cases in
   `apps/services/control-plane/test/http.test.ts`.)*
 - [ ] Retention policy for raw events and idempotency records.
-- [ ] A real-Redis integration test that kills the worker mid-pass and proves the restart resumes
-      without duplicating effects (the queue's durability is proven; the resume-through-a-pass is not).
+- [x] A real-Redis integration test that kills the worker mid-pass and proves the restart resumes
+      without duplicating effects. *(Done: `apps/services/worker/test/integration/restart.test.ts`
+      drives the real unit table over a real Redis queue — page one commits, the pass dies on page
+      two, the consumer is stopped, and a fresh consumer re-armed from the committed cursor imports
+      only what was missing. The test is honest about its own limit: the sync-state store in it is the
+      in-memory one, because the worker reaches the durable store over HTTP and a unit test cannot
+      stand that up. Store durability is proven separately against real Postgres in
+      `apps/services/control-plane/test/integration/sync-state-store.test.ts`; the two together cover
+      the criterion, neither alone does. Skipped when `TEST_REDIS_URL` is unset, so `pnpm test` stays
+      usable without Redis.)*
 - **Only if a channel documents its webhook signature**: a webhook receiver (verify, persist raw,
   dedup, enqueue, return fast). Until then reconciliation is the whole story, which ADR 0002 already
   makes the source of truth.
@@ -583,9 +591,11 @@ pull, a real-Redis restart test, and retention.
 - [x] Reconciliation respects the rate-limit budget and never starves real-time operations. *(A
       refusal defers the unit with the governor's `Retry-After` instead of failing it, and the queue
       carries no second limiter, so there is one budget — ADR 0013.)*
-- [~] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects. *The
-      durable queue and the idempotency lease are in place and unit-tested; the end-to-end restart
-      test on real Redis is still open.*
+- [x] Kill the worker mid-reconciliation; on restart it resumes without duplicating effects. *(Done:
+      `apps/services/worker/test/integration/restart.test.ts` kills a pass after page one commits and
+      proves a fresh consumer resumes from the committed cursor without re-importing what landed. It
+      runs on the in-memory store by design; the durable store is proven separately against real
+      Postgres. The two together cover the criterion.)*
 - [x] Drift dashboard shows unresolved drift returning to zero after repair. *(The control plane's
       `GET /v1/sync/drift/:tenantId/:channel` reads the shared classifier over the durable store; the
       HTTP test takes a failed ref from one count to zero after the reopen-and-commit repair path
