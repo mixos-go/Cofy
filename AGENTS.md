@@ -220,16 +220,23 @@ green, because a checker that silently stops checking is worse than no checker.
    `docs/PLAN.md`.
 2. Look for a relevant ADR in `docs/adr/` before changing a decided area.
 3. Work on **one milestone/issue at a time**. Do not mix several large changes in one PR.
-4. Run `pnpm check` before committing. If it cannot run because the environment is not ready,
+4. **`main` is the release line and `develop` is the integration line.** One long-lived feature branch
+   per milestone is a merge-order trap: the branches stack, and forgetting which one lands first
+   conflicts the rest against a `main` that already moved. Work on `develop` instead — commits carry
+   the state, so a milestone that merges is already a clean ancestor of the next. Branch off `develop`
+   only for work that must land on its own (a hotfix, or a change to a decided area that needs review
+   before anything is built on it), and merge it back promptly. `main` only ever fast-forwards from
+   `develop`, so history stays linear and no commit is replayed twice.
+5. Run `pnpm check` before committing. If it cannot run because the environment is not ready,
    **say so in the PR** — do not claim it is green.
-5. If you make an architectural decision not covered by the docs, **write an ADR** using the
+6. If you make an architectural decision not covered by the docs, **write an ADR** using the
    format in `docs/adr/0000-template.md`.
-6. If you find `AGENTS.md` is no longer accurate, update it in the same PR as the change that
+7. If you find `AGENTS.md` is no longer accurate, update it in the same PR as the change that
    made it inaccurate.
-7. When you tick a milestone exit criterion in `docs/PLAN.md`, record next to it the command you
+8. When you tick a milestone exit criterion in `docs/PLAN.md`, record next to it the command you
    ran and what it printed. A criterion is evidence, not intent: "tenant isolation passes" means a
    named test file passing against a real database, and the plan entry says which one.
-8. If part of an exit criterion is unmet, leave it unticked and write the gap under the milestone's
+9. If part of an exit criterion is unmet, leave it unticked and write the gap under the milestone's
    "Known limits". An unticked box with a stated reason is worth more than a ticked one nobody can
    reproduce.
 
