@@ -368,6 +368,21 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   (`packages/sync-state/testing`), or "the in-memory one mirrors the real one" is an assumption, and
   the difference surfaces as a production-only bug. The suite lives on a `./testing` subpath so
   `node:test` never loads in a running service.
+- **A sync SLO on a pull-driven path is bounded by the cadence, so declare it and check it against
+  the cadence.** ADR 0002 promised eventual consistency "within an SLO" but named no number, and the
+  M6 criterion inherited that gap. Freshness on the pull path is the interval between reconciliation
+  passes, so a cadence longer than the SLO promises something the system cannot deliver: the fix is
+  one shared constant (`CHANNEL_SYNC_SLO_SECONDS`) plus `cadenceMeetsSyncSlo`, checked in
+  `readReconciliationInterval` so a bad cadence stops startup rather than shipping an unmet promise.
+  The SLO is also two-sided — the engine must move the number *and* the push's own read
+  (`GET /admin/stock-levels`) must return it — so the assertion is split across the real-Medusa
+  test and the worker boundary test rather than duplicated in one place that can only see one side.
+- **The end of a milestone is where an unproven integration — not an unimplemented feature —
+  hides.** M6's backend, screens and isolation were all done and green, and the only open criterion
+  was a cross-cutting statement ("WMS reflects in channel stock") that belonged to neither the WMS
+  code nor the M4 push. When a criterion names two subsystems, prove each half where it lives and
+  say in the plan which test covers which half; a single test reaching across both boundaries would
+  need a fake for one of them, and the fake is where the two halves silently stop agreeing.
 - **A UI client and the route it calls are two files that can disagree while both suites pass.**
   `apps/web/oms-web/src/control-plane.ts` builds a URL string; the control plane's route table in
   `http.ts` matches it. Nothing type-checks the pair, so a renamed path or a changed method keeps

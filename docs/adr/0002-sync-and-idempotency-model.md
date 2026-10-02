@@ -39,6 +39,11 @@ Concretely:
   nothing; it exists precisely because they are not.
 - **Rate limiting is centralized in a shared governor.** Connectors report `Retry-After` and
   rate-limit errors; the governor decides when work is dispatched.
+- **The sync SLO is declared, not implied.** A stock change reaches a channel within
+  `CHANNEL_SYNC_SLO_SECONDS` (300s, `packages/contracts`). Because the pull path is the source of
+  truth, freshness is bounded by the reconciliation cadence, so the worker refuses to start on a
+  cadence longer than the SLO (`cadenceMeetsSyncSlo`). A deployment that needs a longer cadence must
+  revisit the SLO rather than quietly exceed it.
 
 Order of authority when sources disagree: **reconciliation pull > webhook > local cache.**
 
@@ -65,7 +70,11 @@ Order of authority when sources disagree: **reconciliation pull > webhook > loca
 
 - **More moving parts**: queue, workflow engine, reconciliation scheduler, idempotency store.
 - **Latency**: sync is eventually consistent. We must be explicit with sellers that stock
-  propagation is not instantaneous, and we need an SLO for it.
+  propagation is not instantaneous, and we need an SLO for it. *Resolved:* the SLO is declared
+  (`CHANNEL_SYNC_SLO_SECONDS`) and enforced against the cadence at worker startup, and
+  `apps/services/worker/test/stock-sync-slo.test.ts` asserts a change reaches the channel within it.
+  What remains a measurement rather than a guarantee is the duration of a single pass, which the
+  governor's per-call limits bound and production observes.
 - **Storage grows**: raw webhook events and idempotency records need retention policies.
 - **Reconciliation costs API quota**, which competes with real-time operations. Cursor design and
   backoff must be deliberate.

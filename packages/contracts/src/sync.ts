@@ -156,6 +156,34 @@ export interface DriftSummary {
 export const DEFAULT_STALE_RESERVATION_MS = 15 * 60 * 1000;
 
 /**
+ * How long a stock change may take to reach a channel: the platform's declared sync SLO.
+ *
+ * ADR 0002 accepts eventual consistency for stock but requires that we *state* the bound rather
+ * than leave it implied, because that number is what a seller is promised and what an operator
+ * sizes the reconciliation cadence against. The value is a product decision, not a tuning knob:
+ * a seller corrects stock so a marketplace stops overselling, so the window is small; it is also
+ * spend against a marketplace's shared app-key budget, so it cannot be arbitrarily tight.
+ *
+ * It is the *upper bound on the reconciliation cadence*, not on one pass: a pull-driven
+ * convergence can only be as fresh as the interval between passes, so a cadence longer than this
+ * cannot meet the promise (`cadenceMeetsSyncSlo` makes that checkable, and the worker refuses to
+ * start on a cadence that fails it). The other half of the budget — how long one pass takes — is
+ * bounded by the governor's per-call limits and is measured in production, not asserted here.
+ */
+export const CHANNEL_SYNC_SLO_SECONDS = 300;
+
+/**
+ * Whether a reconciliation cadence can meet the declared sync SLO.
+ *
+ * The pull path is the source of truth (ADR 0002), so a stock change is reflected at the next
+ * pass. A cadence longer than the SLO therefore promises freshness the system cannot deliver,
+ * which is the failure this predicate exists to make impossible to configure silently.
+ */
+export function cadenceMeetsSyncSlo(intervalSeconds: number): boolean {
+  return Number.isFinite(intervalSeconds) && intervalSeconds > 0 && intervalSeconds <= CHANNEL_SYNC_SLO_SECONDS;
+}
+
+/**
  * Classify one order ref, or null when it is not drifting.
  *
  * Pure and shared so the worker's repair pass and the control plane's dashboard cannot disagree

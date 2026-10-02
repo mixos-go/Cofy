@@ -29,7 +29,7 @@ This file is the **single source of truth for what we are building next**.
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
-| M6 | WMS core (inbound, pick, pack, stocktake) | Screens done; channel-sync SLO assertion open | M5 |
+| M6 | WMS core (inbound, pick, pack, stocktake) | Complete | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
@@ -727,15 +727,17 @@ transport *and* end to end against a booted Medusa HTTP server (`test/integratio
 
 **Goal.** Warehouse operations that Medusa does not provide.
 
-**Status.** Screens delivered; one exit criterion still open. The **backend is delivered and proven
-end to end**: the `wms` and `purchase-order` modules, the inbound and outbound workflows, the Admin
-API routes and the stock ledger all exist, and `test/integration/wms-stock-write-path.test.ts` boots
-a real Medusa, walks receipt → put-away → pick → stocktake over HTTP, and reads
-`inventory_level.stocked_quantity` out of the tenant schema to show the engine's number and the
-ledger's moved together. The **WMS screens in `apps/web/oms-web` are now built** — layout, inbound,
-pick tasks, stocktakes, and the per-bin contents and ledger — over a new control-plane seller WMS
-surface (`/v1/seller/wms/*`, capability-gated by `wms:read`/`wms:write`). The remaining gap is the
-channel-sync SLO assertion below, not a screen. Design: `docs/adr/0018`.
+**Status.** Complete. The **backend is delivered and proven end to end**: the `wms` and
+`purchase-order` modules, the inbound and outbound workflows, the Admin API routes and the stock
+ledger all exist, and `test/integration/wms-stock-write-path.test.ts` boots a real Medusa, walks
+receipt → put-away → pick → stocktake over HTTP, and reads `inventory_level.stocked_quantity` out of
+the tenant schema to show the engine's number and the ledger's moved together — then reads the same
+number back through `GET /admin/stock-levels`, the exact route the M4 push compares against, so the
+change is pushable. The **WMS screens in `apps/web/oms-web` are built** — layout, inbound, pick
+tasks, stocktakes, and the per-bin contents and ledger — over a new control-plane seller WMS surface
+(`/v1/seller/wms/*`, capability-gated by `wms:read`/`wms:write`). The channel-sync SLO is now
+declared (`CHANNEL_SYNC_SLO_SECONDS`, ADR 0002), asserted at the worker boundary, and enforced
+against the cadence at startup. Design: `docs/adr/0018`.
 
 **Deliverables**
 
@@ -779,10 +781,16 @@ channel-sync SLO assertion below, not a screen. Design: `docs/adr/0018`.
       an impersonated session read the warehouse and get a 403 on every write, and
       `apps/web/oms-web/test/control-plane.test.ts` pins that each screen function addresses the
       route the control plane actually serves.*
-- [ ] WMS operations reflect in channel stock within the sync SLO. *The stock half holds — the M6
-      test proves the engine's inventory level moves on receipt and on a stocktake correction, which
-      is the number the M4 push reads — but no test asserts the push that follows lands within the
-      SLO.*
+- [x] WMS operations reflect in channel stock within the sync SLO. *Proven in two halves, one per
+      side of the boundary. The engine half: `test/integration/wms-stock-write-path.test.ts` shows a
+      receipt and a stocktake move `inventory_level`, and reads the number back through
+      `GET /admin/stock-levels` — the route the M4 push compares against — so the change is
+      pushable. The channel half: `apps/services/worker/test/stock-sync-slo.test.ts` shows a stock
+      change the warehouse made is carried to the channel in one pass (the channel is pushed the
+      local number, not its stale one), and that the pass re-arms on a cadence within the declared
+      SLO. The SLO itself is `CHANNEL_SYNC_SLO_SECONDS` (300s) in `packages/contracts`; the worker
+      refuses to start on a cadence longer than it (`cadenceMeetsSyncSlo`), so the promise cannot be
+      configured away. Skipped without `TEST_DATABASE_URL`, like the other real-Medusa tests.*
 
 **Non-goals**
 

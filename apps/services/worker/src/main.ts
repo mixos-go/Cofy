@@ -13,6 +13,7 @@ import { createServer } from "node:http";
 import { createLogger } from "@platform/observability";
 import type { LogLevel } from "@platform/observability";
 import type { ChannelCode } from "@platform/contracts";
+import { CHANNEL_SYNC_SLO_SECONDS, cadenceMeetsSyncSlo } from "@platform/contracts";
 import { InMemoryMedusaAdminKeyStore } from "@platform/secrets";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import {
@@ -60,6 +61,16 @@ function readReconciliationInterval(): number {
   const seconds = Number(raw);
   if (raw === undefined || raw === "" || !Number.isFinite(seconds) || seconds <= 0) {
     throw new Error("RECONCILIATION_INTERVAL_SECONDS must be a positive number of seconds.");
+  }
+  // The pull path is the source of truth (ADR 0002), so a stock change is only as fresh as the
+  // interval between passes. A cadence longer than the declared SLO promises freshness the system
+  // cannot deliver, so it stops startup rather than shipping a number we cannot meet. A deployment
+  // that genuinely needs a longer cadence must revisit the SLO, not quietly exceed it.
+  if (!cadenceMeetsSyncSlo(seconds)) {
+    throw new Error(
+      `RECONCILIATION_INTERVAL_SECONDS=${seconds} exceeds the channel sync SLO of ` +
+        `${CHANNEL_SYNC_SLO_SECONDS}s; the cadence is what determines stock freshness (ADR 0002).`
+    );
   }
   return seconds;
 }

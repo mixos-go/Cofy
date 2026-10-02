@@ -188,6 +188,25 @@ test(
       }
     });
 
+    await t.test("the M4 push read returns the WMS-adjusted number, so the change can propagate", async () => {
+      // The criterion is "WMS operations reflect in channel stock". The push is addressed by the
+      // stored listing map and its *comparison* value comes from `GET /admin/stock-levels` — the
+      // route the worker's `listStockLevels` calls (docs/adr/0015). Reading it here proves the two
+      // halves meet: the WMS moved `inventory_level`, and the exact read the push compares against
+      // now reports the moved number, so the next reconciliation pass has nothing to drift against.
+      const levels = await call(`/admin/stock-levels?sku=${encodeURIComponent(seed.sku)}`);
+      assert.equal(levels.status, 200);
+      const level = (levels.body as { levels: { sku: string; available: number }[] }).levels.find(
+        (entry) => entry.sku === seed.sku
+      );
+      assert.ok(level !== undefined, "the tenant must sell the received SKU");
+      assert.equal(
+        level.available,
+        9,
+        "the push's own read must return received-minus-variance, so a channel push carries the warehouse's number"
+      );
+    });
+
     await t.test("a pick completes only with the right barcode", async () => {
       assert.equal(seed.expectedBarcode, seed.barcode, "the task must carry the variant's barcode");
       assert.equal(seed.pickStatus, "completed", "scanning the right barcode completes the task");
