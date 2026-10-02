@@ -72,6 +72,20 @@ export interface Shipment {
   readonly createdAt: Instant;
 }
 
+/**
+ * The tracking details a channel is told once a courier has issued them (docs/adr/0020).
+ *
+ * This is the projection of a `Shipment` that a marketplace wants: the waybill number, and the URL
+ * its buyer can follow, when the courier provides one. It is deliberately not a `Shipment`: the
+ * marketplace has no notion of our courier code, service level or shipment status, and handing it
+ * one would leak our vocabulary across the boundary (AGENTS.md §4).
+ */
+export interface TrackingWriteBack {
+  readonly trackingNumber: string;
+  /** Trackable URL for the buyer. `null` when the courier returned none. */
+  readonly trackingUrl: string | null;
+}
+
 export const SHIPMENT_STATUSES = [
   "created",
   "picked_up",

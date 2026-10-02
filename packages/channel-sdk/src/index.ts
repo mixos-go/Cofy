@@ -8,7 +8,8 @@ import type {
   Instant,
   Page,
   StockResult,
-  StockUpdate
+  StockUpdate,
+  TrackingWriteBack
 } from "@platform/contracts";
 
 /**
@@ -65,6 +66,23 @@ export interface ChannelConnector {
 
   /** Push available quantities to the marketplace. */
   pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]>;
+
+  /**
+   * Write a courier's tracking number back to the marketplace, so the buyer sees the waybill
+   * (docs/adr/0020). This is the approval-gated extension of this interface; a channel that has no
+   * such operation declares `capabilities().supportsTrackingWriteBack` as `false` and this method
+   * throws rather than silently doing nothing (ADR 0009's rule).
+   *
+   * `tracking` is courier-neutral: the connector maps it into its own acknowledgement/ship call. A
+   * retried write-back is safe to repeat — setting the same waybill twice is idempotent at the
+   * channel — but the worker still records an idempotency key, so the platform's own audit of the
+   * outbound write is complete (AGENTS.md §2.4).
+   */
+  attachTrackingNumber(
+    externalOrderId: string,
+    tracking: TrackingWriteBack,
+    credential: Credential
+  ): Promise<void>;
 
   /** Webhook handlers keyed by the event type the marketplace sends. */
   webhookHandlers(): Readonly<Record<string, WebhookHandler>>;

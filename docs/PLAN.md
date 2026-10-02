@@ -30,7 +30,7 @@ This file is the **single source of truth for what we are building next**.
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Complete | M5 |
-| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020, courier boundary, auditable rate shopping and the courier provider surface are delivered; real providers, tracking write-back and delivery-status sync remain | M6 |
+| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping, the courier provider surface and the channel tracking write-back are delivered; real providers, the shipment-create workflow and delivery-status sync remain | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
 E0 is a prerequisite track (see below), not a milestone: the production egress decision and the
@@ -803,16 +803,20 @@ against the cadence at startup. Design: `docs/adr/0018`.
 
 **Goal.** Ship orders through Indonesian couriers without manual re-entry.
 
-**Status.** In progress. The **design, the rate-shopping core and the provider surface are
-delivered**: `docs/adr/0020` decides where a courier integration lives (connector-style providers in
-the integration plane, with the shipment itself in the tenant's Medusa Fulfillment module),
-`packages/contracts/src/fulfillment.ts` adds the courier-neutral types and the pure `selectCourier`
-rule, `packages/courier-sdk` fixes the `CourierProvider` interface, and the integration plane now
-exposes a courier surface (`/v1/couriers/*`) that fans quotes out across registered providers, books
-the quote rate shopping chose, tracks and cancels — all under the shared governor, which now governs
-`CourierCode` on the same footing as `ChannelCode`. A real courier provider is blocked on sourcing a
-courier SDK (ADR 0007's vendoring rule); the surface is proven with in-test providers. The exit
-criteria are unticked: they need a real provider, the shipment workflow and the UI.
+**Status.** In progress. The **design, the rate-shopping core, the provider surface and the tracking
+write-back are delivered**: `docs/adr/0020` decides where a courier integration lives
+(connector-style providers in the integration plane, with the shipment itself in the tenant's Medusa
+Fulfillment module), `packages/contracts/src/fulfillment.ts` adds the courier-neutral types and the
+pure `selectCourier` rule, `packages/courier-sdk` fixes the `CourierProvider` interface, and the
+integration plane now exposes a courier surface (`/v1/couriers/*`) that fans quotes out across
+registered providers, books the quote rate shopping chose, tracks and cancels — all under the shared
+governor, which now governs `CourierCode` on the same footing as `ChannelCode`. The tracking
+write-back to the channel is built (ADR 0020's approval-gated extension): the `ChannelConnector`
+gains `attachTrackingNumber` and a `supportsTrackingWriteBack` capability, the plane exposes
+`/v1/channels/:channel/tracking`, and the worker runs a `shipment.write_back` unit. A real courier
+provider is blocked on sourcing a courier SDK (ADR 0007's vendoring rule); the courier surface is
+proven with in-test providers. The exit criteria are still unticked: they need a real provider, the
+shipment-create workflow that joins a courier to a channel order, and the UI.
 
 **Deliverables**
 
@@ -826,15 +830,20 @@ criteria are unticked: they need a real provider, the shipment workflow and the 
   `packages/contracts/test/rate-shopping.test.ts`. The plane's quote fan-out feeds it the quotes and
   books the chosen one — `apps/services/integration-plane/test/couriers.test.ts`. Wiring it into a
   shipment workflow is next.)*
-- Tracking number write-back to the channel.
+- Tracking number write-back to the channel. *(Delivered: `ChannelConnector.attachTrackingNumber`
+  plus `supportsTrackingWriteBack` (ADR 0020's approved extension), the plane route
+  `/v1/channels/:channel/tracking`, and the worker `shipment.write_back` unit. TikTok Shop implements
+  it via `fulfillment/updateShippingInfo`; Shopee declares `false` and refuses loudly until its
+  channel-dependent `ship_order` shape is resolved — see the known limit below.)*
 - Handover and delivery status sync back into the order.
 
 **Exit criteria**
 
 - [ ] Fulfilling an order produces a tracking number and writes it back to the channel.
-      *(Half delivered: the plane books a shipment and returns a waybill; the write-back to the
-      channel needs the `ChannelConnector.attachTrackingNumber` method ADR 0020 leaves
-      approval-gated, and the worker workflow that calls both.)*
+      *(Mostly delivered: the plane books a shipment and returns a waybill, and the write-back path
+      exists end to end — capability-gated, governed, idempotent on the waybill. What remains is the
+      shipment-create workflow that joins a booked courier shipment to the channel order and enqueues
+      `shipment.write_back`, and a real courier provider to book against.)*
 - [ ] Delivery status updates flow back and are visible in the OMS UI.
       *(Half delivered: the plane pulls a shipment's events from the provider; the track pass and
       the UI are next.)*
@@ -863,6 +872,21 @@ criteria are unticked: they need a real provider, the shipment workflow and the 
 - **No courier provider is registered in production yet.** The plane answers honestly that it serves
   none until a provider is vendored and wired in `main.ts`; a courier key configured with no provider
   is logged at startup rather than failing a request.
+- **Shopee's tracking write-back is not implemented yet.** Shopee's write-back is `ship_order`, but
+  the correct request shape is channel-dependent: the waybill goes under
+  `non_integrated.tracking_number` for a shop that arranges its own courier and under
+  `pickup.tracking_number` for one Shopee integrates, and which one applies is decided by
+  `get_shipping_parameter` (`info_needed`) plus the shop's channel list. The vendored SDK's
+  `ship_order` body spec lists only `["order_sn", "package_number", "pickup"]`, so the `non_integrated`
+  path cannot be expressed through it without a guess. Shopee therefore declares
+  `supportsTrackingWriteBack: false` and `attachTrackingNumber` throws rather than no-op, so a caller
+  cannot mistake silence for a written waybill. The fix is to implement the `get_shipping_parameter`
+  flow and both shapes, then verify against a live Development Shop before flipping the capability.
+- **TikTok's write-back sends no shipping-provider id.** `updateShippingInfo` takes an optional
+  `shipping_provider_id` alongside the tracking number, and the courier-neutral input has no
+  equivalent. Only `tracking_number` is sent; a shop that requires a provider id will reject the call
+  and the failure is surfaced (as `UPSTREAM_ERROR`) rather than guessed at. The fix is to carry the
+  provider id from the courier's own metadata once a real provider exists.
 
 ---
 

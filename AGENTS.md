@@ -117,13 +117,16 @@ export interface ChannelConnector {
   fetchOrders(cursor: Cursor, cred: Credential): Promise<Page<ChannelOrder>>;
   acknowledgeOrder(externalOrderId: string, cred: Credential): Promise<void>;
   pushStock(items: readonly StockUpdate[], cred: Credential): Promise<readonly StockResult[]>;
+  attachTrackingNumber(externalOrderId: string, tracking: TrackingWriteBack, cred: Credential): Promise<void>;
   webhookHandlers(): Readonly<Record<string, WebhookHandler>>;
   capabilities(): ChannelCapabilities;              // declaration, not assumption
 }
 ```
 
 The authoritative definition lives in `packages/channel-sdk/src/index.ts`; the block above is a
-summary. The shape is frozen and its rationale is recorded in `docs/adr/0005`.
+summary. The shape is frozen and its rationale is recorded in `docs/adr/0005`. `attachTrackingNumber`
+is the one approved extension to it (docs/adr/0020): a channel that cannot write tracking back
+declares `supportsTrackingWriteBack: false` and the method throws rather than no-op.
 
 Connector rules:
 

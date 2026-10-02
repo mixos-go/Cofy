@@ -19,4 +19,11 @@ export interface ChannelCapabilities {
   readonly supportsListingRead: boolean;
   /** True when the channel can report variant stock we can compare against Medusa (docs/adr/0015). */
   readonly supportsStockSnapshotRead: boolean;
+  /**
+   * True when the channel accepts a tracking number written back after a courier issues one
+   * (docs/adr/0020). `false` means the channel has no such operation and the write-back is never
+   * attempted; a connector flips this to `true` only when it implements and tests the method
+   * (ADR 0009's rule).
+   */
+  readonly supportsTrackingWriteBack: boolean;
 }

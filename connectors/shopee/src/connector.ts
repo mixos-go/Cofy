@@ -25,7 +25,8 @@ import type {
   Instant,
   Page,
   StockResult,
-  StockUpdate
+  StockUpdate,
+  TrackingWriteBack
 } from "@platform/contracts";
 import type {
   AuthorizationContext,
@@ -315,6 +316,32 @@ export class ShopeeConnector implements ChannelConnector {
     throw new PlatformError(
       "VALIDATION_FAILED",
       `Shopee does not support order acknowledgement (attempted for ${externalOrderId}); see capabilities().`
+    );
+  }
+
+  /**
+   * Declared unsupported for now, and refuses loudly (docs/adr/0020).
+   *
+   * Shopee's write-back is `ship_order`, but the correct request shape is channel-dependent: the
+   * waybill goes under `non_integrated.tracking_number` for a shop that arranges its own courier and
+   * under `pickup.tracking_number` for one Shopee integrates, and which one applies is decided by
+   * `get_shipping_parameter` (which returns `info_needed`) plus the shop's channel list. The vendored
+   * SDK's `ship_order` body spec lists only `["order_sn", "package_number", "pickup"]`, so the
+   * `non_integrated` path cannot even be expressed through it without a guess. Guessing here would
+   * either fail against a live shop or, worse, ship with the wrong address, so the capability stays
+   * `false` until the `get_shipping_parameter` flow and both shapes are implemented and verified
+   * against a live Development Shop. Recorded under M7 known limits in docs/PLAN.md.
+   */
+  async attachTrackingNumber(
+    externalOrderId: string,
+    tracking: TrackingWriteBack,
+    credential: Credential
+  ): Promise<void> {
+    void credential;
+    void tracking;
+    throw new PlatformError(
+      "VALIDATION_FAILED",
+      `Shopee tracking write-back is not implemented yet (attempted for ${externalOrderId}); see capabilities().`
     );
   }
 
@@ -618,7 +645,10 @@ export class ShopeeConnector implements ChannelConnector {
       splitsOrderHistory: false,
       supportsListingRead: true,
       // `get_model_list` carries `stock_info_v2`, so a snapshot is a real read (docs/adr/0015).
-      supportsStockSnapshotRead: true
+      supportsStockSnapshotRead: true,
+      // `ship_order`'s correct shape is channel-dependent and needs `get_shipping_parameter` first;
+      // see `attachTrackingNumber` and M7 known limits (docs/adr/0020).
+      supportsTrackingWriteBack: false
     };
   }
 

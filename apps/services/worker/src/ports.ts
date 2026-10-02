@@ -29,7 +29,8 @@ import type {
   TenantId,
   ChannelSkuMap,
   ChannelOrderRef,
-  ChannelOrderRefStatus
+  ChannelOrderRefStatus,
+  TrackingWriteBack
 } from "@platform/contracts";
 
 /** Platform-owned sync state (ADR 0010). Backed by the control-plane registry. */
@@ -150,6 +151,18 @@ export interface ChannelGateway {
     readonly channel: ChannelCode;
     readonly items: readonly StockUpdate[];
   }): Promise<readonly StockResult[]>;
+
+  /**
+   * Write a courier's waybill back to the channel (docs/adr/0020). Gated by the channel's
+   * `supportsTrackingWriteBack` capability, which the integration plane also enforces; the worker
+   * checks it so a channel without the operation is a clear skip rather than a failed call.
+   */
+  attachTrackingNumber(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+    readonly tracking: TrackingWriteBack;
+  }): Promise<void>;
 }
 
 /** A sellable variant in the tenant's Medusa, resolved by our own SKU. */
@@ -499,6 +512,20 @@ export class HttpChannelGateway implements ChannelGateway {
       items: input.items
     })) as { readonly results: readonly StockResult[] };
     return body.results;
+  }
+
+  async attachTrackingNumber(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+    readonly tracking: TrackingWriteBack;
+  }) {
+    await this.#post(`/v1/channels/${input.channel}/tracking`, {
+      tenantId: input.tenantId,
+      externalOrderId: input.externalOrderId,
+      trackingNumber: input.tracking.trackingNumber,
+      trackingUrl: input.tracking.trackingUrl
+    });
   }
 }
 

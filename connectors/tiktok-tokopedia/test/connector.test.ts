@@ -379,8 +379,35 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     supportsOrderAcknowledgement: false,
     splitsOrderHistory: true,
     supportsListingRead: true,
-    supportsStockSnapshotRead: true
+    supportsStockSnapshotRead: true,
+    supportsTrackingWriteBack: true
   });
+});
+
+test("attachTrackingNumber posts the waybill to the order's shipping-info update", async () => {
+  const t = transport([{ code: 0, data: {} }]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  await connector.attachTrackingNumber(
+    "576461413038785752",
+    { trackingNumber: "JX1234567890", trackingUrl: "https://track.example.test/JX1234567890" },
+    credential
+  );
+
+  assert.equal(t.urls.length, 1);
+  assert.match(t.urls[0] ?? "", /\/fulfillment\/202309\/orders\/576461413038785752\/shipping_info\/update/);
+  const sent = JSON.parse(t.bodies[0] ?? "{}") as { tracking_number?: string };
+  assert.equal(sent.tracking_number, "JX1234567890");
+});
+
+test("attachTrackingNumber surfaces a business error code instead of reading a 200 as success", async () => {
+  // TikTok answers application errors in an HTTP 200 body; an unmapped one would look accepted.
+  const connector = new TikTokConnector(makeConfig(transport([{ code: 105001, message: "invalid parameter" }]).fetch));
+
+  await assert.rejects(
+    connector.attachTrackingNumber("order-1", { trackingNumber: "JX1", trackingUrl: null }, credential),
+    (error: unknown) => error instanceof PlatformError && error.code === "UPSTREAM_ERROR"
+  );
 });
 
 test("no webhook handlers are exposed while verification is unimplemented", () => {

@@ -33,7 +33,8 @@ import type {
   Instant,
   Page,
   StockResult,
-  StockUpdate
+  StockUpdate,
+  TrackingWriteBack
 } from "@platform/contracts";
 import type {
   AuthorizationContext,
@@ -53,7 +54,7 @@ import { assertIdr, decimalToMinor, epochSecondsToInstant } from "./money.ts";
 import type { TikTokOrder, TikTokOrderDetailResponse, TikTokOrderSearchResponse } from "./order-schema.ts";
 import { lineQuantity } from "./order-schema.ts";
 import { TikTokShop, buildAuthUrl, exchangeAuthCode, refreshAccessToken } from "./vendor/tiktok-shop-sdk.ts";
-import type { GetOrderListBody, SearchProductsBody, TokenResponse } from "./vendor/tiktok-shop-sdk.ts";
+import type { GetOrderListBody, SearchProductsBody, TokenResponse, UpdateShippingInfoResponse } from "./vendor/tiktok-shop-sdk.ts";
 
 /** Cursor payload. Opaque to the caller; only this connector may interpret it (contract doc). */
 interface TikTokCursor {
@@ -350,6 +351,32 @@ export class TikTokConnector implements ChannelConnector {
     );
   }
 
+  /**
+   * Write a courier's waybill back to the order (docs/adr/0020).
+   *
+   * `updateShippingInfo` addresses the order and takes the tracking number. The courier-neutral
+   * input carries no TikTok shipping-provider id, so only `tracking_number` is sent; a shop that
+   * requires a provider id will reject this and the failure is surfaced rather than guessed at
+   * (recorded under M7 known limits). TikTok answers an application error in a 200 body, so the
+   * response passes through `assertSuccess` before it is treated as accepted.
+   */
+  async attachTrackingNumber(
+    externalOrderId: string,
+    tracking: TrackingWriteBack,
+    credential: Credential
+  ): Promise<void> {
+    const client = this.clientFor(credential);
+    try {
+      const response = (await client.fulfillment.updateShippingInfo(
+        { order_id: externalOrderId },
+        { tracking_number: tracking.trackingNumber }
+      )) as UpdateShippingInfoResponse;
+      assertSuccess(response, "attachTrackingNumber");
+    } catch (error) {
+      throw toPlatformError(error, "attachTrackingNumber");
+    }
+  }
+
   async pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]> {
     const client = this.clientFor(credential);
     const results: StockResult[] = [];
@@ -581,7 +608,10 @@ export class TikTokConnector implements ChannelConnector {
       splitsOrderHistory: true,
       supportsListingRead: true,
       // `searchProducts` carries per-SKU `inventory`, so a snapshot is a real read (docs/adr/0015).
-      supportsStockSnapshotRead: true
+      supportsStockSnapshotRead: true,
+      // Implemented against `fulfillment/updateShippingInfo` and proven by the contract test; see
+      // `attachTrackingNumber` for the shipping-provider-id gap (docs/adr/0020).
+      supportsTrackingWriteBack: true
     };
   }
 

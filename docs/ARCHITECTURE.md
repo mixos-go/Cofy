@@ -101,6 +101,9 @@ Owns everything about *talking to the outside world*.
   tenant's data plane, written through the worker's `CommerceClient` port (ADR 0010). Rate shopping
   is not a service concern: it is the pure `selectCourier` function in `packages/contracts`, so the
   choice and its audit come from one place, and the plane books the exact quote that function chose.
+  The channel tracking write-back (the `ChannelConnector` extension ADR 0020 gated) is also here:
+  `POST /v1/channels/:channel/tracking` writes a courier's waybill to the marketplace order, gated on
+  `supportsTrackingWriteBack` and under the governor like any other outbound write.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
 
@@ -113,7 +116,8 @@ never import each other (AGENTS.md §3).
 
 Owns *executing work over time*.
 
-- Consumes queue jobs and runs workflows (order import, listing import, stock push, fulfillment sync).
+- Consumes queue jobs and runs workflows (order import, listing import, stock push, tracking
+  write-back, fulfillment sync).
 - Runs the reconciliation scheduler: it seeds the first `reconcile.orders` and `reconcile.stock` pass
   per capable target and each unit re-arms its own next run, so the cadence lives in the queue and
   survives a restart.

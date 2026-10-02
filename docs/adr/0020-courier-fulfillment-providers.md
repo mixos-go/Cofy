@@ -1,16 +1,17 @@
 # ADR 0020 — Courier fulfillment providers are connectors, and rate shopping is a pure auditable rule
 
-- **Status:** Proposed (needs approval before the parts that extend a frozen interface — see Decision)
+- **Status:** Accepted
 - **Date:** 2026-09-26
 - **Deciders:** Cofy platform engineering
 
 > Approval note: the courier-neutral contracts, the pure rate-shopping rule, `packages/courier-sdk`
-> and the integration plane's courier provider surface are additive and are built now (the surface is
+> and the integration plane's courier provider surface were additive and built first (the surface is
 > proven with in-test providers in `apps/services/integration-plane/test/couriers.test.ts`; a real
-> provider waits on a vendored courier SDK, ADR 0007). Two pieces are **not** built until a human
-> approves them: the `ChannelConnector` tracking write-back (extends the interface frozen by
-> ADR 0005/0009/0015) and, if a courier ever needs a top-level `couriers/` zone, that layout change.
-> The `connector:*` boundary allowance for `courier-sdk` is the one line in
+> provider waits on a vendored courier SDK, ADR 0007). The approval-gated piece — the
+> `ChannelConnector` tracking write-back that extends the interface frozen by ADR 0005/0009/0015 — was
+> **approved and built** as M7 increment 2: `attachTrackingNumber` and `supportsTrackingWriteBack` on
+> the contract, the plane route `/v1/channels/:channel/tracking`, and the worker `shipment.write_back`
+> unit. The `connector:*` boundary allowance for `courier-sdk` is the one line in
 > `tooling/boundaries/src/config.js` this ADR already records as accepted; it is applied.
 
 ## Context
@@ -76,8 +77,10 @@ Concretely:
   by the seller UI through the existing seller read surface (ADR 0016).
 - **Tracking write-back extends the frozen connector contract** with one method,
   `attachTrackingNumber(externalOrderId, tracking, credential)`, plus a `supportsTrackingWriteBack`
-  capability that flips `true` only when a channel implements and tests it (ADR 0009's rule). This is
-  the approval-gated part; until it is approved no connector changes.
+  capability that flips `true` only when a channel implements and tests it (ADR 0009's rule). This was
+  the approval-gated part; it was approved and built (see the approval note). The write-back is
+  capability-gated at both the plane route and the worker unit, and idempotent on the waybill, so a
+  retry replays and a corrected number is a new operation.
 - **Delivery status is a pull path, reconciled like stock.** A `shipment.track` unit walks active
   shipments, asks the provider for their events, writes new events to the Fulfillment record, and
   advances the channel status. Webhooks are an optimization if a courier offers them; the pull path is

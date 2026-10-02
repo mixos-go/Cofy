@@ -16,3 +16,4 @@ export type {
   SearchProductsBody,
   UpdateInventoryRequest
 } from "../../vendor/tiktok-shop-sdk/dist/generated/Product/index.js";
+export type { UpdateShippingInfoResponse } from "../../vendor/tiktok-shop-sdk/dist/generated/Fulfillment/index.js";

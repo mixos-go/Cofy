@@ -34,6 +34,7 @@ import { importListingsOnce } from "./listing-import.ts";
 import { importOrdersOnce } from "./order-import.ts";
 import type { EventPublisher } from "./order-import.ts";
 import { pushStockOnce } from "./stock-push.ts";
+import { writeBackTrackingOnce } from "./tracking-writeback.ts";
 import { repairDrift } from "./drift.ts";
 import { reconcileStockOnce } from "./stock-reconcile.ts";
 import { deferralFor } from "./rate-limit.ts";
@@ -77,6 +78,21 @@ const stockPushPayload = z
         })
       )
       .min(1)
+  })
+  .strict();
+
+/**
+ * A tracking write-back job (docs/adr/0020): one order's waybill, as the shipment produced it.
+ *
+ * Validated at the boundary like every other payload. A unit needs both the order and the waybill;
+ * without either there is nothing to tell the channel, so the schema refuses it rather than sending
+ * a call the marketplace would reject.
+ */
+const trackingWriteBackPayload = z
+  .object({
+    externalOrderId: z.string().min(1).max(128),
+    trackingNumber: z.string().min(1).max(128),
+    trackingUrl: z.string().url().max(1024).nullable().default(null)
   })
   .strict();
 
@@ -187,6 +203,32 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
       });
     },
 
+    // Tracking write-back (docs/PLAN.md M7, docs/adr/0020). One order's waybill to the channel it
+    // came from. Capability-gated inside the workflow, so a channel without the operation is a skip
+    // rather than a failed job, and idempotent on the waybill so a retry cannot rewrite the audit.
+    "shipment.write_back": async (job): Promise<WorkflowRunResult> => {
+      const channel = requireChannel(job);
+      return runUnit(job, logger, now, async () => {
+        const parsed = trackingWriteBackPayload.parse(job.payload);
+        const outcome = await writeBackTrackingOnce(
+          { syncState, gateway, events, logger },
+          {
+            tenantId: job.tenantId,
+            channel,
+            externalOrderId: parsed.externalOrderId,
+            tracking: { trackingNumber: parsed.trackingNumber, trackingUrl: parsed.trackingUrl }
+          }
+        );
+        logger.info("unit.shipment.write_back.completed", {
+          tenantId: job.tenantId,
+          channel,
+          written: outcome.written,
+          skipped: outcome.skipped,
+          replayed: outcome.replayed
+        });
+      });
+    },
+
     // Scheduled convergence and drift repair (docs/PLAN.md M4). Deliberately the *same* function the
     // real-time unit calls — `importOrdersOnce` — so repair and real-time import cannot drift into
     // two behaviours (ADR 0002, ADR 0013). The only difference is `retryFailedRefs`, which the
@@ -248,6 +290,7 @@ export const REGISTERED_UNITS: readonly WorkflowUnit[] = [
   "order.import",
   "listing.import",
   "stock.push",
+  "shipment.write_back",
   "reconcile.orders",
   "reconcile.stock"
 ];

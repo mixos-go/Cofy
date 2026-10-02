@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import type { ChannelCapabilities, ChannelConnector, Credential } from "@platform/channel-sdk";
-import type { ChannelListing, ChannelOrder, ChannelStockLevel, Cursor, Page } from "@platform/contracts";
+import type { ChannelListing, ChannelOrder, ChannelStockLevel, Cursor, Page, TrackingWriteBack } from "@platform/contracts";
 import { RateLimitedError } from "@platform/contracts";
 import { RateLimitGovernor } from "@platform/rate-governor";
 import { createLogger } from "@platform/observability";
@@ -132,6 +132,18 @@ class RecordingConnector implements ChannelConnector {
   webhookHandlers(): Readonly<Record<string, never>> {
     return {};
   }
+  trackingCapable = false;
+  /** What `attachTrackingNumber` was given, so a test can prove the route passed the write through. */
+  lastTrackingWrite: { externalOrderId: string; tracking: TrackingWriteBack } | null = null;
+  trackingWrites = 0;
+
+  async attachTrackingNumber(
+    externalOrderId: string,
+    tracking: TrackingWriteBack
+  ): Promise<void> {
+    this.trackingWrites += 1;
+    this.lastTrackingWrite = { externalOrderId, tracking };
+  }
   capabilities(): ChannelCapabilities {
     return {
       supportsOrderPull: true,
@@ -140,7 +152,8 @@ class RecordingConnector implements ChannelConnector {
       supportsOrderAcknowledgement: false,
       splitsOrderHistory: true,
       supportsListingRead: true,
-      supportsStockSnapshotRead: this.snapshotCapable
+      supportsStockSnapshotRead: this.snapshotCapable,
+      supportsTrackingWriteBack: this.trackingCapable
     };
   }
 }
@@ -821,6 +834,74 @@ test("disconnect refuses an unknown channel rather than clearing an arbitrary ke
       body: JSON.stringify({ tenantId: "tnt-a" })
     });
     assert.equal(response.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the tracking route writes the waybill through the connector with the stored credential", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.trackingCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/tracking`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({
+        tenantId: "tnt-a",
+        externalOrderId: "ext-1",
+        trackingNumber: "JX1234567890",
+        trackingUrl: "https://track.example.test/JX1234567890"
+      })
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(h.connector.lastTrackingWrite, {
+      externalOrderId: "ext-1",
+      tracking: { trackingNumber: "JX1234567890", trackingUrl: "https://track.example.test/JX1234567890" }
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+test("the tracking route refuses a channel that cannot write tracking back", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.trackingCapable = false;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/tracking`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1", trackingNumber: "JX1" })
+    });
+
+    assert.equal(response.status, 422);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "VALIDATION_FAILED");
+    // The connector must not have been reached: a capability gate that still calls is not a gate.
+    assert.equal(h.connector.trackingWrites, 0);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the tracking route defaults a missing trackingUrl to null", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.trackingCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/tracking`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1", trackingNumber: "JX1" })
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(h.connector.lastTrackingWrite?.tracking, { trackingNumber: "JX1", trackingUrl: null });
   } finally {
     await h.close();
   }

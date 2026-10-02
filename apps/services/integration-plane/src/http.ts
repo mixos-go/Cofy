@@ -131,6 +131,19 @@ const trackingBody = z.object({
   trackingNumber: z.string().min(1).max(128)
 });
 
+/**
+ * A tracking write-back in courier-neutral terms (docs/adr/0020).
+ *
+ * The waybill a courier issued, addressed to the marketplace order it belongs to. `trackingUrl` is
+ * nullable because not every courier returns one; the connector sends whatever it was given.
+ */
+const trackingWriteBackBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  externalOrderId: z.string().min(1).max(128),
+  trackingNumber: z.string().min(1).max(128),
+  trackingUrl: z.string().url().max(1024).nullable().default(null)
+});
+
 /** Load the credential for a tenant and channel, or fail as disconnected. */
 async function credentialFor(
   options: IntegrationPlaneOptions,
@@ -153,6 +166,7 @@ async function requireCapability(
     | "supportsListingRead"
     | "supportsStockPush"
     | "supportsStockSnapshotRead"
+    | "supportsTrackingWriteBack"
 ): Promise<void> {
   // A connector declares what it can do (AGENTS.md §4). Calling past a `false` would either throw
   // from the connector or, worse, look like an empty success; refusing here makes it a clear error.
@@ -483,6 +497,31 @@ export function createRoutes(
           connector.pushStock(parsed.items, credential)
         );
         return { results };
+      }
+    },
+    {
+      // Write a courier's waybill back to the marketplace order (docs/adr/0020). Gated on
+      // `supportsTrackingWriteBack`: a channel that cannot does not get the call, and the worker
+      // learns that from the capability rather than from a silent no-op. Spends channel budget like
+      // any other outbound write, so it goes through the governor.
+      method: "POST",
+      path: "/v1/channels/:channel/tracking",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = trackingWriteBackBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsTrackingWriteBack");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        await callChannel(options, channel, parsed.tenantId, () =>
+          connector.attachTrackingNumber(
+            parsed.externalOrderId,
+            { trackingNumber: parsed.trackingNumber, trackingUrl: parsed.trackingUrl },
+            credential
+          )
+        );
+        return { written: true, channel, externalOrderId: parsed.externalOrderId };
       }
     },
     {

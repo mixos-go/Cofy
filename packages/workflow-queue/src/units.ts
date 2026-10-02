@@ -14,6 +14,7 @@ export type WorkflowUnit =
   | "order.import"
   | "listing.import"
   | "stock.push"
+  | "shipment.write_back"
   | "reconcile.orders"
   | "reconcile.stock";
 
@@ -21,6 +22,7 @@ export const WORKFLOW_UNITS: readonly WorkflowUnit[] = [
   "order.import",
   "listing.import",
   "stock.push",
+  "shipment.write_back",
   "reconcile.orders",
   "reconcile.stock"
 ];

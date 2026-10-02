@@ -346,7 +346,8 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     supportsOrderAcknowledgement: false,
     splitsOrderHistory: false,
     supportsListingRead: true,
-    supportsStockSnapshotRead: true
+    supportsStockSnapshotRead: true,
+    supportsTrackingWriteBack: false
   });
 });
 
@@ -520,6 +521,19 @@ test("acknowledgeOrder fails loudly because the channel has no such operation", 
     () => connector.acknowledgeOrder("201214JAJXU6G7", credential),
     (error: unknown) => error instanceof PlatformError && error.code === "VALIDATION_FAILED"
   );
+});
+
+test("attachTrackingNumber refuses loudly while Shopee's write-back shape is unresolved", async () => {
+  // The capability is `false`; the method must throw rather than no-op, so a caller cannot mistake
+  // silence for a written waybill. See the connector comment and M7 known limits.
+  const { fetch: fetchImpl, urls } = transport([{ error: "", response: {} }]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  await assert.rejects(
+    () => connector.attachTrackingNumber("201214JAJXU6G7", { trackingNumber: "JX1", trackingUrl: null }, credential),
+    (error: unknown) => error instanceof PlatformError && error.code === "VALIDATION_FAILED"
+  );
+  assert.equal(urls.length, 0);
 });
 
 test("bench begin and complete authorization produce a usable URL and credential", async () => {

@@ -17,7 +17,8 @@ import type {
   ChannelStockLevel,
   StockResult,
   StockUpdate,
-  TenantId
+  TenantId,
+  TrackingWriteBack
 } from "@platform/contracts";
 import { PlatformError } from "@platform/contracts";
 import type {
@@ -112,7 +113,8 @@ export class FakeChannelGateway implements ChannelGateway {
     supportsOrderAcknowledgement: false,
     splitsOrderHistory: false,
     supportsListingRead: true,
-    supportsStockSnapshotRead: true
+    supportsStockSnapshotRead: true,
+    supportsTrackingWriteBack: true
   });
 
   async capabilities(input: { readonly channel: ChannelCode }): Promise<ChannelCapabilities> {
@@ -178,6 +180,30 @@ export class FakeChannelGateway implements ChannelGateway {
       if (item.externalSkuId === undefined) return { sku: item.sku, accepted: false, reason: "unknown_sku" };
       return { sku: item.sku, accepted: true, reason: null };
     });
+  }
+
+  /** Every tracking write-back attempted, in order, so a test can prove what the channel was told. */
+  readonly trackingWrites: {
+    tenantId: TenantId;
+    channel: ChannelCode;
+    externalOrderId: string;
+    tracking: TrackingWriteBack;
+  }[] = [];
+  /** When set, the next write-back throws this — e.g. the governor refusing the call. */
+  trackingWriteError: Error | null = null;
+
+  async attachTrackingNumber(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+    readonly tracking: TrackingWriteBack;
+  }): Promise<void> {
+    if (this.trackingWriteError !== null) {
+      const error = this.trackingWriteError;
+      this.trackingWriteError = null;
+      throw error;
+    }
+    this.trackingWrites.push(input);
   }
 }
 
