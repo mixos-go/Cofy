@@ -24,6 +24,13 @@ import {
 } from "@medusajs/medusa/core-flows";
 
 export default async function seed({ container }: { container: MedusaContainer }): Promise<void> {
+  // The fixture is shared by more than one test, so the buyer email and the variant SKU are read
+  // from the environment. The seller-read test leaves them at the defaults; the two-tenant isolation
+  // test sets a distinct pair per tenant, which is what lets it prove that the instance that
+  // answered a read was the caller's own.
+  const buyerEmail = process.env.SEED_ORDER_EMAIL ?? "buyer@example.com";
+  const variantSku = process.env.SEED_VARIANT_SKU ?? "SKU-1";
+
   const salesChannel = first(
     (
       await createSalesChannelsWorkflow(container).run({
@@ -53,7 +60,7 @@ export default async function seed({ container }: { container: MedusaContainer }
               variants: [
                 {
                   title: "Kaos M",
-                  sku: "SKU-1",
+                  sku: variantSku,
                   // The seller read proves the money boundary and the line projection; inventory
                   // reservation is the write path's concern (M3) and is exercised there.
                   manage_inventory: false,
@@ -75,7 +82,7 @@ export default async function seed({ container }: { container: MedusaContainer }
       input: {
         region_id: region.id,
         sales_channel_id: salesChannel.id,
-        email: "buyer@example.com",
+        email: buyerEmail,
         currency_code: "idr",
         status: "pending",
         items: [{ title: "Kaos M", variant_id: variant.id, quantity: 2, unit_price: 20000 }]

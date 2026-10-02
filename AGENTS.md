@@ -200,8 +200,14 @@ style.** Consistency matters more than design preference.
   (`test/integration/seller-read.test.ts`) boots a real Medusa HTTP server: `db:migrate` through the
   pinned CLI, a fixture under `data-plane/medusa-config/src/scripts/` run by `medusa exec` to seed
   through the vendor's own core workflows, then `medusa start` and the real client. Fixtures live in
-  the data plane because `medusa exec` resolves them there and they import `@medusajs/*`, which no
+  the data plane because   `medusa exec` resolves them there and they import `@medusajs/*`, which no
   `@platform/*` workspace may (AGENTS.md §2.1).
+- **Integration tests that boot a real Medusa run serially.** `test:integration` for
+  `apps/services/control-plane` passes `--test-concurrency=1`. `node --test` runs test *files* in
+  parallel by default, and once two files each boot a Medusa instance they compete for the same
+  cores: the later boot then times out waiting on `/health` instead of failing an assertion, so the
+  symptom is a flake that reads like a broken fixture. One booted instance at a time is the point of
+  the flag; do not remove it. The shared boot/seed helpers live in `test/integration/medusa-harness.ts`.
 
 ---
 

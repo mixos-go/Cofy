@@ -22,7 +22,6 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { Pool } from "pg";
 import {
   PostgresTenantSchemaAdmin,
@@ -31,21 +30,16 @@ import {
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import type { MedusaTargetStore } from "@platform/contracts";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
-import type { Logger } from "@platform/control-plane";
-
-const DATABASE_URL = process.env.TEST_DATABASE_URL;
-
-const MEDUSA_CWD = new URL("../../../../../data-plane/medusa-config", import.meta.url).pathname;
-const MEDUSA_COMMAND = `${MEDUSA_CWD}/node_modules/.bin/medusa`;
-const SEED_SCRIPT = "src/scripts/seed-seller-read-order.ts";
+import {
+  DATABASE_URL,
+  SEED_SCRIPT,
+  databaseUrlFor,
+  runMedusa,
+  startServer,
+  silentLogger
+} from "./medusa-harness.ts";
 
 const TENANT_ID = "tnt-seller-read-itest";
-
-function databaseUrlFor(base: string, databaseName: string): string {
-  const url = new URL(base);
-  url.pathname = `/${databaseName}`;
-  return url.toString();
-}
 
 interface SeedResult {
   readonly orderId: string;
@@ -53,68 +47,6 @@ interface SeedResult {
   readonly secretKey: string;
 }
 
-/** Runs a Medusa CLI subcommand to completion, returning its exit code and output. */
-function runMedusa(
-  args: readonly string[],
-  env: Record<string, string>,
-  timeoutMs: number
-): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(MEDUSA_COMMAND, [...args], {
-      cwd: MEDUSA_CWD,
-      env: { ...process.env, ...env },
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ exitCode: code ?? 1, stdout, stderr });
-    });
-  });
-}
-
-/** Boots `medusa start` and waits for `/health`, so the reader has something real to call. */
-async function startServer(
-  env: Record<string, string>,
-  port: number,
-  timeoutMs: number
-): Promise<{ stop: () => void }> {
-  const child = spawn(MEDUSA_COMMAND, ["start", "--port", String(port)], {
-    cwd: MEDUSA_CWD,
-    env: { ...process.env, ...env, PORT: String(port) },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  // Drained, never buffered: a verbose boot must not fill a pipe and stall the process.
-  child.stdout.resume();
-  child.stderr.resume();
-
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (child.exitCode !== null) {
-      throw new Error(`Medusa exited during boot with code ${child.exitCode}.`);
-    }
-    try {
-      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) {
-        return { stop: () => child.kill("SIGKILL") };
-      }
-    } catch {
-      // Not listening yet.
-    }
-  }
-  child.kill("SIGKILL");
-  throw new Error(`Medusa did not become healthy within ${timeoutMs}ms.`);
-}
-
-/** A target/key store over one already-running instance; the test knows both by construction. */
 function storesFor(baseUrl: string, secretKey: string): {
   targets: MedusaTargetStore;
   keys: MedusaAdminKeyStore;
@@ -140,15 +72,6 @@ function storesFor(baseUrl: string, secretKey: string): {
   };
 }
 
-const silentLogger: Logger = {
-  info() {},
-  warn() {},
-  error() {},
-  debug() {},
-  child() {
-    return silentLogger;
-  }
-};
 
 test(
   "the seller read returns a real Medusa order, with the fields and the money unit we ask for",

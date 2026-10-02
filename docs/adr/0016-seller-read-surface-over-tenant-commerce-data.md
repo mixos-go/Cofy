@@ -101,7 +101,7 @@ ADR reuses that established mechanism rather than re-proving it.
 **Verified end to end by an automated test** (amended, closing the gap this ADR first
 recorded). `apps/services/control-plane/test/integration/seller-read.test.ts` boots a vanilla Medusa
 2.21.1 HTTP server against a dedicated database: it migrates a tenant schema through the pinned CLI,
-runs a fixture (`data-plane/medusa-config/src/scripts/seed-seller-read-order.ts`) that creates a sales
+runs a fixture (`data-plane/medusa-config/src/scripts/seed-tenant-order.ts`) that creates a sales
 channel, an IDR region, a published product and one pending order through Medusa's own core workflows,
 starts the server, and reads the order back through `SellerOrderReader` over HTTP Basic. It asserts
 the fields the projection depends on actually come back — `display_id` as a **number** (not a string,
