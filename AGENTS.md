@@ -150,6 +150,11 @@ style.** Consistency matters more than design preference.
   commit messages, ADRs, and docs. Chat, summaries, and feedback to the user are written in
   **Indonesian**. Never use Chinese (Mandarin) in either — not in prose, not in identifiers, not
   as an accidental paste.
+  - **Exception — text a seller reads.** User-visible copy in the seller UI (`apps/web/oms-web`)
+    is Indonesian, because the people using it are Indonesian sellers and a half-translated screen
+    is worse than either language. This covers rendered strings and page `<title>`s only.
+    Identifiers, comments, test names, and everything the seller does not see stay English, so the
+    exception cannot quietly widen.
 - **Runtime is Node with native TypeScript type stripping.** Relative imports carry real
   extensions (`./thing.ts`). Do not use `enum`, `namespace`, or parameter properties — type
   stripping does not support them. See `docs/adr/0006`.
@@ -491,3 +496,14 @@ it. Same rule as §9/§10. Full rationale: `docs/adr/0011`.
   `@medusajs/framework`, which pnpm does not link as an executable. Pin `@medusajs/cli` as an
   explicit devDependency of `medusa-config`; a test that invokes a binary by path must have that
   binary as a direct dependency, or it passes on a warm developer tree and fails on a cold one.
+- **A second React major in the workspace silently re-resolves the data plane's React.** Adding a
+  Next.js app on React 19 added a second `react`/`react-dom` to the graph, and pnpm resolved
+  `data-plane/modules/channel-order-link`'s `@medusajs/medusa` to **React 19** while
+  `medusa-config` stayed on 18 — one data plane split across two React majors, visible only as a
+  lockfile key change (`react@18.3.1` → `react@19.3.0` in the importer's peer suffix) and a peer
+  warning. Next 15 accepts `react ^18.2.0 || ^19.0.0`, so the fix is to keep **one** React major
+  for the whole workspace (18.3.1, the one Medusa already brought) rather than upgrade the data
+  plane. When a lockfile diff looks like a downgrade, compare reference *counts*
+  (`git show HEAD:pnpm-lock.yaml | grep -c 'react-dom@18.3.1'`) before believing it: re-keying peer
+  suffixes deletes and re-adds the same entries, so the line count moves while the resolution does
+  not.

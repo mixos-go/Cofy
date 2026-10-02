@@ -649,6 +649,9 @@ against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
 **Deliverables**
 
 - `apps/web/oms-web`: Next.js app consuming our own APIs (not Medusa Admin).
+  *(Shell delivered — ADR 0017: session-gated pages for login, order list, order detail, and sync
+  health, reading only through the control plane. No component library yet; that is deliberate and
+  revisitable. Manual actions are still absent because the write path is.)*
 - Channel connection flow (the single-click OAuth promise) with clear connection health.
 - **[x] Order list/detail with channel source and status.** *(Done for the API: `GET /v1/seller/orders`
   and `GET /v1/seller/orders/:orderId`, both session-scoped with `order:read` and the tenant taken
@@ -677,10 +680,11 @@ against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
       flow and the UI that calls it are not built.*
 - [x] Failed syncs are visible with an actionable explanation, not a raw error. *(The sync-health read
       returns prose per problem and the tests assert the internal kind does not leak.)*
-- [ ] Tenant isolation test: tenant A cannot see tenant B orders through any UI endpoint.
-      *The seller read takes its tenant from the session, so a cross-tenant URL is not expressible;
-      the HTTP tests cover the authorization path but an explicit two-tenant order test is still
-      owed.*
+- [x] Tenant isolation test: tenant A cannot see tenant B orders through any UI endpoint.
+      *Proven end to end: `test/integration/tenant-seller-isolation.test.ts` boots two real Medusa
+      instances — separate schema, separate admin secret, separate port — seeds a distinct order in
+      each, then reads both through the real seller HTTP surface. A seller listing orders sees only
+      its own, and asking for the other tenant's order id is refused rather than served.*
 - [ ] Every UI action maps to an audited API call (no client-side-only state changes).
 - [ ] Operator role is distinct from seller roles; ops-console endpoints reject seller credentials.
       *Partially proven from the other direction: the seller read rejects an operator.*
