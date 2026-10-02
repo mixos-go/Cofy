@@ -28,6 +28,7 @@ import { authorize } from "./identity.ts";
 import type { TenantRegistry } from "./tenants.ts";
 import type { ProvisioningOrchestrator } from "./provisioning.ts";
 import type { TenantTerminationService } from "./termination.ts";
+import type { SellerOrderReader } from "./seller-orders.ts";
 import { driftFor, driftSummaryFor, explainDrift } from "./drift.ts";
 
 /** A route either requires a session, a service token, or is explicitly public. No default. */
@@ -123,6 +124,8 @@ export interface ControlPlaneApiOptions {
   readonly medusaTargets: MedusaTargetStore;
   /** Bearer tokens the worker presents. Empty means the sync-state surface is closed. */
   readonly serviceTokens: readonly string[];
+  /** Seller-facing commerce reads (ADR 0016). Reads the tenant's engine; stores nothing. */
+  readonly sellerOrders: SellerOrderReader;
   readonly logger: Logger;
 }
 
@@ -374,6 +377,52 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
       }
     },
     {
+      // The seller order list (docs/PLAN.md M5, docs/adr/0016). The tenant comes from the session,
+      // never from the path, so a seller cannot read another tenant's orders by editing a URL.
+      //
+      // `order:read` is the capability a `seller_viewer` already holds: seeing orders must not
+      // require the ability to change them.
+      method: "GET",
+      path: "/v1/seller/orders",
+      auth: { kind: "session", capability: "order:read", scope: "self" },
+      handler: async ({ tenantId, request }) => {
+        if (tenantId === null) {
+          // An operator has no tenant of its own, so this surface cannot serve it. The operator
+          // view is separate and names its tenant explicitly.
+          throw new PlatformError("FORBIDDEN", "Seller orders are read for one tenant, and an operator has none.", {
+            details: { hint: "Operator reads name their tenant explicitly." }
+          });
+        }
+
+        const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+        const limit = Math.min(positiveInt(query.get("limit") ?? "20", "limit"), 100);
+        const offset = nonNegativeInt(query.get("offset") ?? "0", "offset");
+        const status = query.get("status");
+
+        return options.sellerOrders.listOrders({
+          tenantId,
+          limit,
+          offset,
+          ...(status === null ? {} : { status })
+        });
+      }
+    },
+    {
+      // One seller order, including its lines (docs/adr/0016). Same session-scoped tenant and the
+      // same `order:read` capability as the list, so the two cannot drift on authorization.
+      method: "GET",
+      path: "/v1/seller/orders/:orderId",
+      auth: { kind: "session", capability: "order:read", scope: "self" },
+      handler: async ({ tenantId, params }) => {
+        if (tenantId === null) {
+          throw new PlatformError("FORBIDDEN", "Seller orders are read for one tenant, and an operator has none.", {
+            details: { hint: "Operator reads name their tenant explicitly." }
+          });
+        }
+        return options.sellerOrders.getOrder({ tenantId, orderId: params.orderId ?? "" });
+      }
+    },
+    {
       // The drift dashboard read (docs/PLAN.md M4). Same classifier and threshold as the worker's
       // repair pass, so the number the dashboard shows is the number reconciliation acts on.
       method: "GET",
@@ -548,6 +597,17 @@ function positiveInt(value: string, name: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new PlatformError("VALIDATION_FAILED", `${name} must be a positive integer.`, { details: { value } });
+  }
+  return parsed;
+}
+
+/** A zero-or-greater integer, for an offset where `0` is meaningful rather than a mistake. */
+function nonNegativeInt(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new PlatformError("VALIDATION_FAILED", `${name} must be a non-negative integer.`, {
+      details: { value }
+    });
   }
   return parsed;
 }

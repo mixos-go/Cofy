@@ -9,7 +9,6 @@
  * Nothing here imports a connector or Medusa. The worker orchestrates over HTTP (ADR 0010).
  */
 
-import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createLogger } from "@platform/observability";
 import type { LogLevel } from "@platform/observability";
@@ -27,7 +26,7 @@ import {
   HttpMedusaTargetResolver,
   HttpSyncStateClient
 } from "./ports.ts";
-import { createTlsTransport } from "./transport.ts";
+import { createTlsTransport, readOptionalCa } from "@platform/http-transport";
 import { InMemoryEventPublisher } from "./events.ts";
 import { createWorkflowHandlers, REGISTERED_UNITS } from "./units.ts";
 import { parseReconciliationTargets, ReconciliationScheduler } from "./reconcile.ts";
@@ -49,16 +48,6 @@ function readToken(name: string): string {
  * private issuer must supply a bundle, and a malformed one stops startup rather than silently
  * falling back to an unverified connection.
  */
-function readOptionalCa(): string | undefined {
-  const path = process.env.MEDUSA_TENANT_CA_CERT_PATH;
-  if (path === undefined || path === "") return undefined;
-  const pem = readFileSync(path, "utf8");
-  if (!pem.includes("BEGIN CERTIFICATE")) {
-    throw new Error("MEDUSA_TENANT_CA_CERT_PATH is not a PEM certificate bundle.");
-  }
-  return pem;
-}
-
 /**
  * The reconciliation cadence, in seconds.
  *

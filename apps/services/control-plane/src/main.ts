@@ -31,6 +31,8 @@ import type { SyncStateStore } from "@platform/sync-state";
 import { PostgresSyncStateStore } from "./sync-state-store.ts";
 import { InMemoryMedusaTargetStore } from "./medusa-target.ts";
 import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
+import { SellerOrderReader } from "./seller-orders.ts";
+import { createTlsTransport, readOptionalCa } from "@platform/http-transport";
 
 async function main(): Promise<void> {
   const logger = createLogger((process.env.LOG_LEVEL as LogLevel | undefined) ?? "info");
@@ -148,6 +150,16 @@ async function main(): Promise<void> {
     logger.info("startup.operator_created", {});
   }
 
+  const sellerOrders = new SellerOrderReader({
+    targets: medusaTargets,
+    keys: medusaAdminKeys,
+    syncState,
+    // The same TLS transport the worker uses, from the same package (ADR 0012 point 6): the seller
+    // read carries the tenant's admin key, so it must not reach a plain-HTTP path.
+    transport: createTlsTransport({ ca: readOptionalCa() }),
+    logger
+  });
+
   const server = createControlPlaneServer({
     registry,
     provisioning,
@@ -156,6 +168,7 @@ async function main(): Promise<void> {
     syncState,
     medusaTargets,
     serviceTokens,
+    sellerOrders,
     logger
   });
   const port = Number(process.env.CONTROL_PLANE_PORT ?? 4001);

@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
-import { InMemorySecretStore } from "@platform/secrets";
+import { InMemorySecretStore, InMemoryMedusaAdminKeyStore } from "@platform/secrets";
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import { InMemoryTenantStore } from "../src/tenant-store.ts";
 import { InMemoryTenantSchemaAdmin } from "../src/tenant-schema.ts";
@@ -24,6 +24,8 @@ import { TenantTerminationService } from "../src/termination.ts";
 import { TenantRegistry } from "../src/tenants.ts";
 import { createControlPlaneServer } from "../src/http.ts";
 import { InMemoryMedusaTargetStore } from "../src/medusa-target.ts";
+import { SellerOrderReader } from "../src/seller-orders.ts";
+import type { SellerReadTransport } from "../src/seller-orders.ts";
 import { createLogger } from "../src/logging.ts";
 import { SYNC_ENTITIES } from "@platform/contracts";
 
@@ -38,6 +40,9 @@ interface Harness {
   schemaAdmin: InMemoryTenantSchemaAdmin;
   syncState: InMemorySyncStateStore;
   medusaTargets: InMemoryMedusaTargetStore;
+  medusaKeys: InMemoryMedusaAdminKeyStore;
+  /** Replace the tenant-engine transport so a seller read is exercised without a live instance. */
+  setSellerTransport: (transport: SellerReadTransport) => void;
   close: () => Promise<void>;
 }
 
@@ -80,6 +85,20 @@ async function startHarness(): Promise<Harness> {
   const sessions = new SessionManager({ accounts, now: () => NOW });
   const syncState = new InMemorySyncStateStore();
   const medusaTargets = new InMemoryMedusaTargetStore();
+  const medusaKeys = new InMemoryMedusaAdminKeyStore();
+
+  // A mutable holder so a test can install its own transport after the server is listening. The
+  // reader is built once, as production builds it, and only the transport seam is swapped.
+  let sellerTransport: SellerReadTransport = () => {
+    throw new Error("seller transport not installed by the test");
+  };
+  const sellerOrders = new SellerOrderReader({
+    targets: medusaTargets,
+    keys: medusaKeys,
+    syncState,
+    transport: (url, init) => sellerTransport(url, init),
+    logger
+  });
 
   const server = createControlPlaneServer({
     registry,
@@ -89,6 +108,7 @@ async function startHarness(): Promise<Harness> {
     syncState,
     medusaTargets,
     serviceTokens: [SERVICE_TOKEN],
+    sellerOrders,
     logger
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -102,6 +122,10 @@ async function startHarness(): Promise<Harness> {
     schemaAdmin,
     syncState,
     medusaTargets,
+    medusaKeys,
+    setSellerTransport: (transport) => {
+      sellerTransport = transport;
+    },
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -380,6 +404,196 @@ test("the API", async (t) => {
       headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
     });
     assert.equal(response.status, 401);
+  });
+
+  await t.test("seller orders are read from the tenant's engine and joined to a channel", async () => {
+    await harness.medusaTargets.set({ tenantId, baseUrl: "https://tenant-a.medusa.example" });
+    await harness.medusaKeys.put(tenantId, "sk_test_secret_value");
+
+    // The channel comes from platform-owned sync state (ADR 0016), not from Medusa. Committing a
+    // ref is what makes this order attributable to Shopee.
+    await harness.syncState.reserveOrderRef({
+      tenantId,
+      channel: "shopee",
+      externalOrderId: "ext-9",
+      now: NOW
+    });
+    await harness.syncState.commitOrderRef(tenantId, "shopee", "ext-9", "order_9", NOW);
+
+    const seen: { url: string; auth: string | undefined }[] = [];
+    harness.setSellerTransport(async (url, init) => {
+      seen.push({ url, auth: (init.headers as Record<string, string>)?.authorization });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            orders: [
+              {
+                id: "order_9",
+                display_id: 12,
+                status: "pending",
+                email: "buyer@example.com",
+                // Medusa stores IDR in whole rupiah.
+                total: 48_000,
+                created_at: NOW,
+                updated_at: NOW,
+                items: [{ quantity: 2 }, { quantity: 1 }]
+              }
+            ],
+            count: 1
+          })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      total: number;
+      orders: { orderId: string; channel: string | null; externalOrderId: string | null; itemCount: number; total: { amount: number; currency: string } }[];
+    };
+
+    assert.equal(body.total, 1);
+    assert.equal(body.orders[0]?.channel, "shopee");
+    assert.equal(body.orders[0]?.externalOrderId, "ext-9");
+    assert.equal(body.orders[0]?.itemCount, 3);
+    // Medusa whole rupiah -> platform sen. A missed 100x is an order priced 100x wrong, with no
+    // error anywhere, so the conversion is asserted rather than assumed.
+    assert.deepEqual(body.orders[0]?.total, { amount: 4_800_000, currency: "IDR" });
+    // The credential is presented as HTTP Basic (ADR 0012) and never appears in the response.
+    assert.ok(seen[0]?.auth?.startsWith("Basic "));
+    assert.ok(seen[0]?.url.includes("/admin/orders"), "the read proxies Medusa's own admin route");
+    assert.ok(!JSON.stringify(body).includes("sk_test_secret_value"));
+  });
+
+  await t.test("an order with no committed ref reports a null channel rather than a guess", async () => {
+    harness.setSellerTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({ orders: [{ id: "order_unattributed", status: "pending", total: 1000, items: [] }], count: 1 })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { orders: { channel: string | null; externalOrderId: string | null }[] };
+    // The order exists in Medusa but the platform has no marketplace reference for it. Saying so is
+    // honest; inventing a channel would disagree with reconciliation.
+    assert.equal(body.orders[0]?.channel, null);
+    assert.equal(body.orders[0]?.externalOrderId, null);
+  });
+
+  await t.test("one seller order returns its lines, with money in sen", async () => {
+    harness.setSellerTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          order: {
+            id: "order_9",
+            display_id: 12,
+            status: "pending",
+            total: 48_000,
+            subtotal: 40_000,
+            shipping_total: 5_000,
+            discount_total: 2_000,
+            created_at: NOW,
+            updated_at: NOW,
+            items: [{ title: "Kaos", variant_sku: "SKU-1", quantity: 2, unit_price: 20_000, subtotal: 40_000 }]
+          }
+        })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders/order_9`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      orderId: string;
+      channel: string | null;
+      subtotal: { amount: number };
+      shipping: { amount: number };
+      discount: { amount: number };
+      lines: { title: string; sku: string | null; quantity: number; unitPrice: { amount: number } }[];
+    };
+
+    assert.equal(body.orderId, "order_9");
+    assert.equal(body.channel, "shopee");
+    assert.deepEqual(body.subtotal, { amount: 4_000_000, currency: "IDR" });
+    assert.deepEqual(body.shipping, { amount: 500_000, currency: "IDR" });
+    assert.deepEqual(body.discount, { amount: 200_000, currency: "IDR" });
+    assert.equal(body.lines[0]?.sku, "SKU-1");
+    assert.deepEqual(body.lines[0]?.unitPrice, { amount: 2_000_000, currency: "IDR" });
+  });
+
+  await t.test("an order Medusa does not have is 404, and a broken engine is not an empty list", async () => {
+    harness.setSellerTransport(async () => ({ ok: false, status: 404, text: async () => "" }));
+    const missing = await fetch(`${harness.baseUrl}/v1/seller/orders/order_nope`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(missing.status, 404);
+
+    harness.setSellerTransport(async () => {
+      throw new Error("connection refused");
+    });
+    const down = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    // An unreachable engine must not read as "no orders": a seller has to tell the two apart.
+    assert.equal(down.status, 502);
+    const body = (await down.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "UPSTREAM_ERROR");
+  });
+
+  await t.test("a tenant with no engine or no key is a hard 404, never a fallback target", async () => {
+    // Removing the key while leaving the target is the case that would otherwise send an empty
+    // credential to a real instance.
+    await harness.medusaKeys.delete(tenantId);
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 404);
+    await harness.medusaKeys.put(tenantId, "sk_test_secret_value");
+  });
+
+  await t.test("the seller order surface requires order:read and a session, not a service token", async () => {
+    harness.setSellerTransport(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ orders: [], count: 0 }) }));
+
+    const noToken = await fetch(`${harness.baseUrl}/v1/seller/orders`);
+    assert.equal(noToken.status, 401);
+
+    // The worker's service token is a different trust than a seller session (ADR 0012).
+    const service = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(service.status, 401);
+
+    // An operator is cross-tenant by construction and has no tenant of its own, so the seller
+    // surface cannot serve it. Its own read names the tenant explicitly.
+    const operator = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    assert.equal(operator.status, 403);
+  });
+
+  await t.test("a seller_viewer can read orders, because order:read is not a write", async () => {
+    // Reuses the viewer account created earlier in this harness: same role, same tenant.
+    const viewerToken = await login(harness.baseUrl, "viewer@example.com", GOOD_PASSWORD);
+
+    harness.setSellerTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ orders: [{ id: "order_9", status: "pending", total: 1000, items: [] }], count: 1 })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(response.status, 200);
   });
 
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {

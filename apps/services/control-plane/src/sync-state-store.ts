@@ -194,6 +194,15 @@ export class PostgresSyncStateStore implements SyncStateStore {
            primary key (tenant_id, channel, external_order_id)
          )`
       );
+      // The primary key is (tenant, channel, external_order_id), which cannot serve a lookup by
+      // order id — the caller of `findOrderRefByOrderId` has an order and not a channel, so the
+      // index has to lead with the columns it does have (ADR 0016). Partial on `order_id is not
+      // null` because a `reserved` ref has no order yet and can never match.
+      await this.#pool.query(
+        `create index if not exists channel_order_refs_order_idx
+           on ${s}.channel_order_refs (tenant_id, order_id)
+           where order_id is not null`
+      );
       await this.#pool.query(
         `create table if not exists ${s}.idempotency_records (
            tenant_id text not null,
@@ -386,6 +395,21 @@ export class PostgresSyncStateStore implements SyncStateStore {
       [input.tenantId, input.channel, input.status ?? null, input.limit ?? null]
     );
     return result.rows.map(orderRefFromRow);
+  }
+
+  async findOrderRefByOrderId(tenantId: TenantId, orderId: OrderId): Promise<ChannelOrderRef | null> {
+    await this.#ensureSchema();
+    // `limit 1` rather than a full scan: one order belongs to one channel order in practice, so the
+    // index lookup is exact. Ordering by `channel` makes the answer deterministic in the one case
+    // where a merge did attach a second reference.
+    const result = await this.#pool.query<OrderRefRow>(
+      `select * from ${this.#schema}.channel_order_refs
+        where tenant_id = $1 and order_id = $2
+        order by channel asc
+        limit 1`,
+      [tenantId, orderId]
+    );
+    return result.rows[0] === undefined ? null : orderRefFromRow(result.rows[0]);
   }
 
   async reopenOrderRef(

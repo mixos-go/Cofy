@@ -1,12 +1,43 @@
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
+import { readFileSync } from "node:fs";
 import { PlatformError } from "@platform/contracts";
-import type { Transport } from "./ports.ts";
 
 /**
- * A TLS-verifying transport for the worker's calls to a tenant's engine (ADR 0012 point 6).
+ * How one outbound hop is made.
  *
- * The worker ships no HTTP dependency (AGENTS.md: no large runtime dependency without a human
+ * This lives in a package rather than in the worker because two services now make credential-bearing
+ * hops — the worker to a tenant's engine and the control plane to the same engine for seller reads
+ * (ADR 0016) — and AGENTS.md §10 is explicit that a security rule must not exist as two copies.
+ * The rule below is that a credential never travels over plain HTTP; a second copy of it is how one
+ * copy quietly stops enforcing it.
+ */
+export type Transport = (
+  url: string,
+  init: RequestInit
+) => Promise<{ readonly ok: boolean; readonly status: number; text(): Promise<string> }>;
+
+/**
+ * Read the optional tenant CA bundle from the environment.
+ *
+ * A private issuer is trusted by pointing `MEDUSA_TENANT_CA_CERT_PATH` at a PEM bundle. A file that
+ * is not a certificate is refused rather than passed to Node, because a malformed `ca` would fail
+ * the handshake with an error that looks like an outage. Both services that reach a tenant read it
+ * the same way, from here, so the check exists once.
+ */
+export function readOptionalCa(path = process.env.MEDUSA_TENANT_CA_CERT_PATH): string | undefined {
+  if (path === undefined || path === "") return undefined;
+  const pem = readFileSync(path, "utf8");
+  if (!pem.includes("BEGIN CERTIFICATE")) {
+    throw new Error("MEDUSA_TENANT_CA_CERT_PATH is not a PEM certificate bundle.");
+  }
+  return pem;
+}
+
+/**
+ * A TLS-verifying transport for calls to a tenant's engine (ADR 0012 point 6).
+ *
+ * The platform ships no HTTP dependency (AGENTS.md: no large runtime dependency without a human
  * call), and Node's global `fetch` cannot be handed a custom CA bundle without `undici`. So the
  * credential-bearing hop uses `node:https` directly, which accepts `ca` and enforces identity
  * verification by default.

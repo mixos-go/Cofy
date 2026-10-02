@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PlatformError } from "@platform/contracts";
 import { HttpChannelGateway, HttpCommerceClient, HttpSyncStateClient } from "../src/ports.ts";
-import type { Transport } from "../src/ports.ts";
+import type { Transport } from "@platform/http-transport";
 
 /** A fetch that returns one canned error response, so the mapping is the only thing under test. */
 function errorTransport(status: number, code: string): typeof fetch {

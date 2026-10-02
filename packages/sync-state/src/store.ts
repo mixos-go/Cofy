@@ -85,6 +85,17 @@ export interface SyncStateStore {
   }): Promise<readonly ChannelOrderRef[]>;
 
   /**
+   * The ref that owns a given order, or null. Unique in practice: one Medusa order is imported
+   * from exactly one channel order, and `isList` on the module link exists only so a merge or a
+   * post-dismissal re-import can attach a second reference, which a commit does not create.
+   *
+   * This is the reverse of `getOrderRef`, and it is what lets a seller-facing read answer "which
+   * marketplace did this order come from" (ADR 0016). It is keyed by `orderId` alone — the caller
+   * has an order and does not know the channel, which is the whole point of asking.
+   */
+  findOrderRefByOrderId(tenantId: TenantId, orderId: OrderId): Promise<ChannelOrderRef | null>;
+
+  /**
    * Return a `failed` ref to `reserved`, so the import can be retried (ADR 0014's repair).
    *
    * Only a `failed` ref is reopened, and only a repair pass calls this — and only while holding the
@@ -313,6 +324,13 @@ export class InMemorySyncStateStore implements SyncStateStore {
           : a.updatedAt.localeCompare(b.updatedAt)
       );
     return input.limit === undefined ? matches : matches.slice(0, input.limit);
+  }
+
+  async findOrderRefByOrderId(tenantId: TenantId, orderId: OrderId): Promise<ChannelOrderRef | null> {
+    for (const ref of this.#refs.values()) {
+      if (ref.tenantId === tenantId && ref.orderId === orderId) return ref;
+    }
+    return null;
   }
 
   async reopenOrderRef(

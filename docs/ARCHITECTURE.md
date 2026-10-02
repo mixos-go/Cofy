@@ -61,8 +61,12 @@ Owns everything about *who the tenant is*, not *what they sell*.
 - Provisioning orchestration: create schema, run Medusa migrations, seed defaults, register
   routes.
 - Billing and usage metering.
+- Seller commerce reads, proxied to the tenant's own Medusa Admin API on behalf of a session
+  (`/v1/seller/...`, ADR 0016). This is a *read-through*: the data is never stored here.
 
-**Never** stores product, order, or stock data. Those live in the tenant data plane.
+**Never** stores product, order, or stock data. Those live in the tenant data plane. The control
+plane does **read** tenant commerce data, but only by calling the tenant's Medusa Admin API and only
+to answer a seller's own request (ADR 0016); it holds no copy of it.
 
 ### Integration plane (`apps/services/integration-plane`)
 
@@ -132,6 +136,7 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 | `packages/tenant-client` | The only allowed path to tenant data | `contracts` |
 | `packages/secrets` | KMS-backed secret access, and the typed `CredentialStore` over it | `contracts` |
 | `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
+| `packages/http-transport` | The credential-bearing HTTP hop: pinned-CA TLS transport, and a plain one for non-credential calls (ADR 0012) | `contracts` |
 | `packages/rate-governor` | Central marketplace rate-limit scheduling: one budget per app key, one per seller | `contracts` |
 | `packages/sync-state` | Platform-owned sync state: external-order refs, idempotency records, SKU→channel maps, cursors | `contracts` |
 | `packages/workflow-queue` | Engine-agnostic workflow dispatch: the `WorkflowQueue` producer port, the shared dispatch loop, an in-memory adapter, a Redis/BullMQ adapter (ADR 0013) | `contracts` |
@@ -270,6 +275,7 @@ packages/                   # stable shared libraries — few, slow to change
   tenant-client/
   secrets/
   observability/
+  http-transport/
   sync-state/
   workflow-queue/
 connectors/                 # adapters — volatile, one package per channel

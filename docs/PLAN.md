@@ -28,7 +28,7 @@ This file is the **single source of truth for what we are building next**.
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
-| M5 | Seller OMS UI & operator console | Not started | M3 |
+| M5 | Seller OMS UI & operator console | In progress — seller read APIs delivered (orders, sync health); no UI yet | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Not started | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
@@ -640,14 +640,32 @@ entities now converge. What remains is the retention policy.
 **Goal.** Sellers can actually run their operations, and our own team can support them. Until now
 everything was API-only.
 
+**Status.** In progress. The seller **read surface** is delivered and tested: orders come from the
+tenant's own Medusa Admin API, proxied by the control plane (ADR 0016), and sync health reads
+platform-owned sync state. No UI exists yet, so the milestone is not done, but the API a UI will
+consume is. The read path is covered by unit tests against a stubbed transport *and* end to end
+against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
+
 **Deliverables**
 
 - `apps/web/oms-web`: Next.js app consuming our own APIs (not Medusa Admin).
 - Channel connection flow (the single-click OAuth promise) with clear connection health.
-- Order list/detail with channel source, status, and manual actions (accept, cancel, reship).
+- **[x] Order list/detail with channel source and status.** *(Done for the API: `GET /v1/seller/orders`
+  and `GET /v1/seller/orders/:orderId`, both session-scoped with `order:read` and the tenant taken
+  from the session, never the URL (ADR 0016). The channel is joined from platform-owned
+  `channel_order_ref`, so the UI and reconciliation read the same fact; an order with no committed ref
+  reports `channel: null` rather than a guess. Money crosses back from Medusa's whole rupiah to the
+  platform's sen in one place. Evidence: the seller-order cases in
+  `apps/services/control-plane/test/http.test.ts`. Manual actions (accept, cancel, reship) are not
+  built — they are writes and belong with the write path.)*
 - Stock view per location, with sync status per channel.
-- Sync health view: what is syncing, what failed, what reconciliation fixed.
-- Tenant-scoped auth and RBAC enforced at the API layer, not just hidden in the UI.
+- **[x] Sync health view: what is syncing, what failed, what reconciliation fixed.** *(Done for the
+  API: `GET /v1/sync/health` reads the shared drift classifier over platform-owned sync state and
+  returns every known channel with an actionable sentence per problem, so the UI never infers absence.
+  Evidence: the sync-health cases in `apps/services/control-plane/test/http.test.ts`.)*
+- Tenant-scoped auth and RBAC enforced at the API layer, not just hidden in the UI. *(Holds for the
+  seller reads: the tenant comes from the session, and the tests assert an operator is refused and a
+  service token is refused.)*
 - `apps/web/ops-console`: internal operator UI — tenant lifecycle, support impersonation (audited
   and time-boxed), and usage/billing views. Separate app from the start so operator screens never
   leak into the seller UI.
@@ -655,15 +673,34 @@ everything was API-only.
 **Exit criteria**
 
 - [ ] A seller can connect a channel and see imported orders without any support involvement.
-- [ ] Failed syncs are visible with an actionable explanation, not a raw error.
+      *Half done: an imported order can be read through `/v1/seller/orders`; the channel-connection
+      flow and the UI that calls it are not built.*
+- [x] Failed syncs are visible with an actionable explanation, not a raw error. *(The sync-health read
+      returns prose per problem and the tests assert the internal kind does not leak.)*
 - [ ] Tenant isolation test: tenant A cannot see tenant B orders through any UI endpoint.
+      *The seller read takes its tenant from the session, so a cross-tenant URL is not expressible;
+      the HTTP tests cover the authorization path but an explicit two-tenant order test is still
+      owed.*
 - [ ] Every UI action maps to an audited API call (no client-side-only state changes).
 - [ ] Operator role is distinct from seller roles; ops-console endpoints reject seller credentials.
+      *Partially proven from the other direction: the seller read rejects an operator.*
 - [ ] Impersonation is logged with actor, target tenant, and expiry.
 
 **Non-goals**
 
 - No WMS screens (picking, packing, stocktake). No accounting. No chat.
+
+**Known limits (recorded, not hidden)**
+
+- **The seller read is covered end to end against a real instance.** `test/integration/seller-read.test.ts`
+  boots a vanilla Medusa 2.21.1 against a dedicated database, seeds an order through Medusa's own core
+  workflows, and reads it back through `SellerOrderReader` over HTTP Basic. It asserts the fields we
+  depend on are populated (`display_id` as a number, `email`, `*items`, `variant_sku`) and that the
+  money crosses from whole rupiah to sen exactly. It still runs only where a database is available
+  (`pnpm test:integration`), not in the default `pnpm test`.
+- **Manual order actions (accept, cancel, reship) are not built.** They are writes to the tenant's
+  commerce engine and need their own decision about idempotency and channel write-back, not a
+  read-surface extension.
 
 ---
 

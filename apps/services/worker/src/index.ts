@@ -7,7 +7,8 @@
  */
 
 export * from "./ports.ts";
-export * from "./transport.ts";
+export type { Transport } from "@platform/http-transport";
+export { createTlsTransport, createPlainTransport } from "@platform/http-transport";
 export * from "./order-import.ts";
 export * from "./listing-import.ts";
 export * from "./stock-push.ts";

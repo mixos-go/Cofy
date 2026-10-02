@@ -13,6 +13,7 @@
  */
 
 import { PlatformError, isRetryable } from "@platform/contracts";
+import type { Transport } from "@platform/http-transport";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
   ChannelCapabilities,
@@ -169,15 +170,10 @@ export interface MedusaStockLevel {
 }
 
 /**
- * The minimal transport shape every HTTP client here depends on.
- *
- * Narrower than `typeof fetch` on purpose: the clients only ever read `ok`, `status` and the body,
- * so a test fake (or the TLS transport below) satisfies this without implementing a full `Response`.
+ * The transport shape every HTTP client here depends on is `Transport` from
+ * `@platform/http-transport`: narrower than `typeof fetch` on purpose, because the clients only
+ * ever read `ok`, `status` and the body, so a test fake satisfies it without a full `Response`.
  */
-export type Transport = (
-  url: string,
-  init: RequestInit
-) => Promise<{ readonly ok: boolean; readonly status: number; text(): Promise<string> }>;
 
 /**
  * A tenant's commerce engine, as resolved for one call (ADR 0012).

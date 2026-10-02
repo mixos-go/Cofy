@@ -497,6 +497,31 @@ export function runSyncStateStoreConformance(
     assert.equal((await state.getCursor("tnt-a", "shopee", "orders"))?.cursor, null);
   });
 
+  test(`${label}: an order is found by its order id, and only within its own tenant`, async () => {
+    const state = await makeStore();
+    await state.reserveOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "ext-1", now: NOW });
+    await state.commitOrderRef("tnt-a", "shopee", "ext-1", "ord_1", NOW);
+
+    const found = await state.findOrderRefByOrderId("tnt-a", "ord_1");
+    assert.equal(found?.channel, "shopee");
+    assert.equal(found?.externalOrderId, "ext-1");
+
+    // The lookup is tenant-scoped: the same order id in another tenant must not resolve. A miss
+    // here is what stops a seller read from borrowing another tenant's channel attribution.
+    assert.equal(await state.findOrderRefByOrderId("tnt-b", "ord_1"), null);
+    assert.equal(await state.findOrderRefByOrderId("tnt-a", "ord_missing"), null);
+  });
+
+  test(`${label}: a reserved ref has no order id, so it is never found by order id`, async () => {
+    const state = await makeStore();
+    await state.reserveOrderRef({ tenantId: "tnt-a", channel: "shopee", externalOrderId: "ext-2", now: NOW });
+
+    // `orderId` is null while reserved. Matching on it must not resolve the row, or a read would
+    // attribute an order that Medusa has not been asked to create yet.
+    assert.equal(await state.findOrderRefByOrderId("tnt-a", "null"), null);
+    assert.equal((await state.getOrderRef("tnt-a", "shopee", "ext-2"))?.orderId, null);
+  });
+
   if (dispose !== undefined) {
     test(`${label}: cleanup`, async () => {
       await dispose();

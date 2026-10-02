@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { InMemoryMedusaAdminKeyStore } from "@platform/secrets";
 import type { TenantId } from "@platform/contracts";
 import { HttpCommerceClient, HttpMedusaTargetResolver } from "../src/ports.ts";
-import type { Transport } from "../src/ports.ts";
+import type { Transport } from "@platform/http-transport";
 
 const TENANT_A = "tnt-a";
 const TENANT_B = "tnt-b";

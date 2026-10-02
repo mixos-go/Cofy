@@ -68,6 +68,8 @@ connectors/*              ->  packages/channel-sdk, packages/contracts
 packages/channel-sdk      ->  packages/contracts
 packages/tenant-client    ->  packages/contracts
 packages/secrets          ->  packages/contracts
+packages/observability    ->  packages/contracts
+packages/http-transport   ->  packages/contracts
 packages/sync-state       ->  packages/contracts
 packages/workflow-queue   ->  packages/contracts
 packages/contracts        ->  (IMPORTS NOTHING)
@@ -191,6 +193,15 @@ style.** Consistency matters more than design preference.
 - **A test may be skipped, never weakened.** The integration suite skips itself when
   `TEST_DATABASE_URL` is unset so that `pnpm test` works without a database. Keep that property: an
   isolation test that silently stops asserting is the failure mode this rule exists to prevent.
+- **A path that proxies a tenant's HTTP API is proven against a booted instance, not a stub.** A
+  stubbed transport proves the projection, the authorization path and the money conversion, but not
+  that the fields we ask the vendor for are the fields it returns — a renamed field becomes a null
+  in production and the stub still passes. The seller read's integration test
+  (`test/integration/seller-read.test.ts`) boots a real Medusa HTTP server: `db:migrate` through the
+  pinned CLI, a fixture under `data-plane/medusa-config/src/scripts/` run by `medusa exec` to seed
+  through the vendor's own core workflows, then `medusa start` and the real client. Fixtures live in
+  the data plane because `medusa exec` resolves them there and they import `@medusajs/*`, which no
+  `@platform/*` workspace may (AGENTS.md §2.1).
 
 ---
 

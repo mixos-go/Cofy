@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@platform/contracts": "workspace:*",
+    "@platform/http-transport": "workspace:*",
     "@platform/observability": "workspace:*",
     "@platform/secrets": "workspace:*",
     "@platform/sync-state": "workspace:*",

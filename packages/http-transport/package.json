@@ -1,0 +1,22 @@
+{
+  "name": "@platform/http-transport",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The one place that decides how an outbound hop is made: TLS-verified when it carries a credential, plain when it does not.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}
