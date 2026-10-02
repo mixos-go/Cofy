@@ -89,6 +89,15 @@ Owns everything about *talking to the outside world*.
   Automatic rescheduling (the engine re-running a refused call) is still M4; M3 enforces the budget
   but does not requeue by itself.)*
 - Credential refresh scheduling.
+- **Courier fulfillment providers (M7, ADR 0020).** Courier integrations are connector-style
+  providers implementing `packages/courier-sdk`'s `CourierProvider`, held beside the channel
+  connectors and reached by the worker over the same service-token surface. They live here for the
+  same reasons: this is where platform-owned app keys are held (ADR 0003), and this is where the
+  governor spends a courier's budget before every call. A courier provider is constructed in
+  `main.ts` and injected, so adding a courier is a wiring change. The shipment itself is *not* stored
+  here — it is a Medusa Fulfillment record in the tenant's data plane, written through the worker's
+  `CommerceClient` port (ADR 0010). Rate shopping is not a service concern: it is the pure
+  `selectCourier` function in `packages/contracts`, so the choice and its audit come from one place.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
 
@@ -137,6 +146,7 @@ One vanilla Medusa v2 instance per tenant. We treat it as a black box with a sta
 |---|---|---|
 | `packages/contracts` | Types, zod schemas, error types, event definitions | nothing |
 | `packages/channel-sdk` | `ChannelConnector` interface + shared connector utilities | `contracts` |
+| `packages/courier-sdk` | `CourierProvider` interface + shared provider utilities (ADR 0020) | `contracts` |
 | `packages/tenant-client` | The only allowed path to tenant data | `contracts` |
 | `packages/secrets` | KMS-backed secret access, and the typed `CredentialStore` over it | `contracts` |
 | `packages/observability` | Structured JSON logging, one shape for every service | `contracts` |
@@ -276,6 +286,7 @@ apps/
 packages/                   # stable shared libraries — few, slow to change
   contracts/
   channel-sdk/
+  courier-sdk/
   tenant-client/
   secrets/
   observability/

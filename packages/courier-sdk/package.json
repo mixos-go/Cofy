@@ -1,0 +1,20 @@
+{
+  "name": "@platform/courier-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The CourierProvider contract. Couriers implement it verbatim; the integration plane depends only on this interface.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@platform/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@platform/tsconfig": "workspace:*",
+    "typescript": "^5.6.3"
+  }
+}

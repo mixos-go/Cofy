@@ -13,6 +13,12 @@ export const PLATFORM_EVENTS = {
   STOCK_CHANGED: "stock.changed",
   /** A stock push to a channel failed after exhausting retries. */
   STOCK_PUSH_FAILED: "stock.push_failed",
+  /** A shipment was created at a courier and recorded in the tenant's data plane (M7). */
+  SHIPMENT_CREATED: "shipment.created",
+  /** A shipment's delivery status changed, as observed by the track pass (M7). */
+  SHIPMENT_STATUS_CHANGED: "shipment.status_changed",
+  /** A shipment could not be created or tracked and needs reconciliation attention (M7). */
+  SHIPMENT_FAILED: "shipment.failed",
   /** A channel credential was revoked by the seller or by the marketplace. */
   CHANNEL_DISCONNECTED: "channel.disconnected",
   /** A tenant finished provisioning and is ready to serve. */

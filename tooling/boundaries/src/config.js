@@ -60,10 +60,13 @@ export const DEFAULT_PACKAGE_TARGETS = ["package:contracts"];
 export const ALLOWED_TARGETS = {
   "package:contracts": null,
   "package:channel-sdk": ["package:contracts"],
+  "package:courier-sdk": ["package:contracts"],
   "package:tenant-client": ["package:contracts"],
   "package:secrets": ["package:contracts"],
   "package:*": DEFAULT_PACKAGE_TARGETS,
-  "connector:*": ["package:channel-sdk", "package:contracts"],
+  // A connector may implement either external-boundary contract: a marketplace channel or a courier
+  // provider. Both are adapters over `contracts` only (docs/adr/0020).
+  "connector:*": ["package:channel-sdk", "package:courier-sdk", "package:contracts"],
   "service:*": ["package:*", "connector:*"],
   "web:*": ["package:*"],
   "data-plane": null,

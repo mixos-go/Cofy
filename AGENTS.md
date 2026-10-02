@@ -64,8 +64,9 @@ apps/web/*                ->  packages/*                 (browser-bundled, we de
   oms-web                     seller-facing UI
   ops-console                 internal operator UI
 
-connectors/*              ->  packages/channel-sdk, packages/contracts
+connectors/*              ->  packages/channel-sdk, packages/courier-sdk, packages/contracts
 packages/channel-sdk      ->  packages/contracts
+packages/courier-sdk      ->  packages/contracts
 packages/tenant-client    ->  packages/contracts
 packages/secrets          ->  packages/contracts
 packages/observability    ->  packages/contracts
@@ -418,6 +419,20 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   needs a logger declares a three-method interface locally — `Logger` from `@platform/observability`
   satisfies it structurally — rather than taking a dependency on the observability package, which
   the boundary checker rejects.
+- **A new external boundary is a sibling of an existing one, not a new layer.** Courier providers
+  (M7) are the same shape as channel connectors — authenticate, call an external API, report rate
+  limits, stay pure with respect to credentials — so they reuse the integration plane's app-key
+  ownership and governor rather than growing a `courier-plane` (docs/adr/0020). A second runtime for
+  the same call shape is surface, not separation. The one genuinely new piece, rate shopping, is a
+  *decision*, not an integration: it belongs in `contracts` as a pure function so the chosen courier
+  and its explanation come from one call and cannot drift.
+- **An audit requirement means the decision must return its own explanation.** M7 asks that rate
+  shopping be "auditable — why this courier was chosen". A log line written next to the choice would
+  be a second artifact that can disagree with it; making `selectCourier` return the chosen quote *and*
+  every rejected quote with its reason makes the audit the return value (docs/adr/0014, docs/adr/0015).
+  The same reasoning forces a deterministic tie-break: without one, quotes equal on price and transit
+  would be ordered by input position, and a caller that collected them concurrently would choose a
+  different courier run to run — an audit that cannot be reproduced is not an audit.
 - **Repair must reopen a failed ref *inside* the pull, not in a loop before it.** Reopening every
   `failed` ref and then re-counting makes the drift number fall to zero for orders the channel's
   current page no longer returns — the dashboard reads healthy while the order is still missing,

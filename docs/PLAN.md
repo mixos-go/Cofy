@@ -803,11 +803,22 @@ against the cadence at startup. Design: `docs/adr/0018`.
 
 **Goal.** Ship orders through Indonesian couriers without manual re-entry.
 
+**Status.** In progress. The **design and the rate-shopping core are delivered**: `docs/adr/0020`
+decides where a courier integration lives (connector-style providers in the integration plane, with
+the shipment itself in the tenant's Medusa Fulfillment module), `packages/contracts/src/fulfillment.ts`
+adds the courier-neutral types and the pure `selectCourier` rule, and `packages/courier-sdk` fixes the
+`CourierProvider` interface. The exit criteria are unticked: they need the provider surface, the
+shipment workflow and the UI, which are the next increments.
+
 **Deliverables**
 
 - Fulfillment module providers for target couriers (JNE, J&T, SiCepat, Anteraja, and/or an
   aggregator such as RajaOngkir).
-- Rate shopping: select courier by tenant-defined rules.
+- Rate shopping: select courier by tenant-defined rules. *(The rule is delivered as a pure function,
+  `selectCourier` in `packages/contracts`: it applies the tenant's hard constraints, applies the
+  chosen strategy, breaks ties deterministically, and returns the chosen quote plus the reason every
+  other quote lost — the audit is the return value, so it cannot drift from the decision. Evidence:
+  `packages/contracts/test/rate-shopping.test.ts`. Wiring it into a shipment workflow is next.)*
 - Tracking number write-back to the channel.
 - Handover and delivery status sync back into the order.
 
@@ -821,6 +832,12 @@ against the cadence at startup. Design: `docs/adr/0018`.
 **Non-goals**
 
 - No warehouse management of courier contracts. No COD reconciliation.
+
+**Known limits (recorded, not hidden)**
+
+- **A courier create is not natively idempotent.** No target courier offers an idempotency key today,
+  so a retried create can produce a second waybill. The idempotency key and the stored shipment are
+  the guard, and a duplicate is an operator-visible failure rather than a silent one (docs/adr/0020).
 
 ---
 
