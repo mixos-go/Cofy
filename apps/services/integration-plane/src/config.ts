@@ -9,7 +9,7 @@
  */
 
 import { PlatformError } from "@platform/contracts";
-import type { ChannelCode } from "@platform/contracts";
+import type { ChannelCode, CourierCode } from "@platform/contracts";
 import type { RateLimitBudget } from "@platform/rate-governor";
 
 /**
@@ -20,9 +20,16 @@ import type { RateLimitBudget } from "@platform/rate-governor";
  * "no limit", so a missing entry here would block the channel outright. Real per-channel values are
  * set with `RATE_LIMIT_APP_BUDGETS` once each marketplace's published limit is confirmed.
  */
-const DEFAULT_APP_BUDGETS: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>> = {
+const DEFAULT_APP_BUDGETS: Readonly<Partial<Record<ChannelCode | CourierCode, RateLimitBudget>>> = {
   tiktok_tokopedia: { capacity: 10, refillPerSecond: 2 },
-  shopee: { capacity: 10, refillPerSecond: 2 }
+  shopee: { capacity: 10, refillPerSecond: 2 },
+  // Couriers are governed on the same kind of budget (docs/adr/0020). These are placeholders like
+  // the channel ones: a courier with no budget would be blocked outright, so a real value matters.
+  jne: { capacity: 10, refillPerSecond: 2 },
+  jnt: { capacity: 10, refillPerSecond: 2 },
+  sicepat: { capacity: 10, refillPerSecond: 2 },
+  anteraja: { capacity: 10, refillPerSecond: 2 },
+  rajaongkir: { capacity: 10, refillPerSecond: 2 }
 };
 
 export interface IntegrationPlaneConfig {
@@ -36,17 +43,22 @@ export interface IntegrationPlaneConfig {
   /** Bearer tokens the control plane and worker present. Never empty; the service fails closed. */
   readonly serviceTokens: readonly string[];
   /**
-   * Per-channel app budgets. Read here so the governor cannot be built with an empty map by
+   * Per-resource app budgets. Read here so the governor cannot be built with an empty map by
    * accident — an empty map is "block every call", which would be a silent outage rather than a
    * configuration error.
    */
-  readonly rateBudgets: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>>;
+  readonly rateBudgets: Readonly<Partial<Record<ChannelCode | CourierCode, RateLimitBudget>>>;
   readonly tiktok: { readonly appKey: string; readonly appSecret: string } | null;
   readonly shopee: {
     readonly partnerId: number;
     readonly partnerKey: string;
     readonly webhookUrl: string;
   } | null;
+  /**
+   * Platform-owned courier keys (ADR 0003, docs/adr/0020). A courier with no key here is not
+   * registered, so an unconfigured courier fails as "unknown courier" rather than at request time.
+   */
+  readonly courierKeys: Readonly<Partial<Record<CourierCode, string>>>;
 }
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -77,7 +89,7 @@ function parsePort(raw: string | undefined, fallback: number): number {
  * that silently falls back to the placeholder for a channel whose real limit is different — which
  * is the exact overspending this governor exists to prevent.
  */
-function parseRateBudgets(raw: string | undefined): Readonly<Partial<Record<ChannelCode, RateLimitBudget>>> {
+function parseRateBudgets(raw: string | undefined): Readonly<Partial<Record<ChannelCode | CourierCode, RateLimitBudget>>> {
   if (raw === undefined || raw === "") return DEFAULT_APP_BUDGETS;
 
   let parsed: unknown;
@@ -94,8 +106,8 @@ function parseRateBudgets(raw: string | undefined): Readonly<Partial<Record<Chan
     });
   }
 
-  const budgets: Partial<Record<ChannelCode, RateLimitBudget>> = {};
-  for (const [channel, value] of Object.entries(parsed as Record<string, unknown>)) {
+  const budgets: Partial<Record<ChannelCode | CourierCode, RateLimitBudget>> = {};
+  for (const [resource, value] of Object.entries(parsed as Record<string, unknown>)) {
     const entry = value as { capacity?: unknown; refillPerSecond?: unknown };
     const capacity = entry?.capacity;
     const refillPerSecond = entry?.refillPerSecond;
@@ -105,13 +117,36 @@ function parseRateBudgets(raw: string | undefined): Readonly<Partial<Record<Chan
       typeof refillPerSecond !== "number" ||
       refillPerSecond <= 0
     ) {
-      throw new PlatformError("VALIDATION_FAILED", `RATE_LIMIT_APP_BUDGETS entry for ${channel} is invalid.`, {
-        details: { channel }
+      throw new PlatformError("VALIDATION_FAILED", `RATE_LIMIT_APP_BUDGETS entry for ${resource} is invalid.`, {
+        details: { resource }
       });
     }
-    budgets[channel as ChannelCode] = { capacity, refillPerSecond };
+    budgets[resource as ChannelCode | CourierCode] = { capacity, refillPerSecond };
   }
   return budgets;
+}
+
+/**
+ * Read the platform-owned courier keys from the environment.
+ *
+ * One variable per courier, and a courier with no key is simply absent: `main.ts` registers only the
+ * couriers it has keys for, so an unconfigured courier is "unknown" rather than a runtime failure
+ * deep inside a provider. The keys never leave this object.
+ */
+function parseCourierKeys(env: NodeJS.ProcessEnv): Readonly<Partial<Record<CourierCode, string>>> {
+  const keys: Partial<Record<CourierCode, string>> = {};
+  const variables: Readonly<Record<CourierCode, string>> = {
+    jne: "JNE_API_KEY",
+    jnt: "JNT_API_KEY",
+    sicepat: "SICEPAT_API_KEY",
+    anteraja: "ANTERAJA_API_KEY",
+    rajaongkir: "RAJAONGKIR_API_KEY"
+  };
+  for (const [courier, variable] of Object.entries(variables) as [CourierCode, string][]) {
+    const value = env[variable];
+    if (value !== undefined && value !== "") keys[courier] = value;
+  }
+  return keys;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): IntegrationPlaneConfig {
@@ -165,6 +200,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): IntegrationPlaneConfig {
     serviceTokens,
     rateBudgets: parseRateBudgets(env.RATE_LIMIT_APP_BUDGETS),
     tiktok,
-    shopee
+    shopee,
+    courierKeys: parseCourierKeys(env)
   };
 }

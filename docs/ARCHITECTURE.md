@@ -94,16 +94,20 @@ Owns everything about *talking to the outside world*.
   connectors and reached by the worker over the same service-token surface. They live here for the
   same reasons: this is where platform-owned app keys are held (ADR 0003), and this is where the
   governor spends a courier's budget before every call. A courier provider is constructed in
-  `main.ts` and injected, so adding a courier is a wiring change. The shipment itself is *not* stored
-  here — it is a Medusa Fulfillment record in the tenant's data plane, written through the worker's
-  `CommerceClient` port (ADR 0010). Rate shopping is not a service concern: it is the pure
-  `selectCourier` function in `packages/contracts`, so the choice and its audit come from one place.
+  `main.ts` and injected, so adding a courier is a wiring change. The plane exposes the courier
+  surface at `/v1/couriers/*`: a credential-free capability matrix, a quote fan-out that reports a
+  failing courier per-courier without sinking the others, and book/track/cancel for the courier in
+  the path. The shipment itself is *not* stored here — it is a Medusa Fulfillment record in the
+  tenant's data plane, written through the worker's `CommerceClient` port (ADR 0010). Rate shopping
+  is not a service concern: it is the pure `selectCourier` function in `packages/contracts`, so the
+  choice and its audit come from one place, and the plane books the exact quote that function chose.
 
 **Never** touches a tenant database directly. It uses `packages/tenant-client`.
 
-The service depends only on the `ChannelConnector` interface; connectors are constructed in
-`main.ts` and injected, so adding a channel does not change the service. It is called by the control
-plane and worker over HTTP with a service token — services never import each other (AGENTS.md §3).
+The service depends only on the `ChannelConnector` and `CourierProvider` interfaces; connectors and
+providers are constructed in `main.ts` and injected, so adding a channel or a courier does not change
+the service. It is called by the control plane and worker over HTTP with a service token — services
+never import each other (AGENTS.md §3).
 
 ### Worker (`apps/services/worker`)
 

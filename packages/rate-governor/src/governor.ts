@@ -20,7 +20,16 @@
  * not change.
  */
 
-import type { ChannelCode, TenantId } from "@platform/contracts";
+import type { ChannelCode, CourierCode, TenantId } from "@platform/contracts";
+
+/**
+ * Anything we call on a platform-owned app key that has a published rate limit.
+ *
+ * A courier is governed exactly like a channel (docs/adr/0020): one budget per app key, one per
+ * seller, one shared cooldown. Naming it neutrally keeps the governor from having two copies of the
+ * same accounting, which is how one copy silently drifts from the other.
+ */
+export type GovernedResource = ChannelCode | CourierCode;
 
 /** A token bucket. `capacity` is the burst; `refillPerSecond` is the sustained rate. */
 export interface RateLimitBudget {
@@ -29,9 +38,9 @@ export interface RateLimitBudget {
 }
 
 export interface GovernorOptions {
-  /** Budget per channel, because the marketplace's limit is per app key and we own one app each. */
-  readonly appBudgets: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>>;
-  /** Applied per (tenant, channel). Defaults to a cautious share of a typical app budget. */
+  /** Budget per resource, because the limit is per app key and we own one app each. */
+  readonly appBudgets: Readonly<Partial<Record<GovernedResource, RateLimitBudget>>>;
+  /** Applied per (tenant, resource). Defaults to a cautious share of a typical app budget. */
   readonly sellerBudget?: RateLimitBudget;
   readonly now?: () => number;
 }
@@ -40,12 +49,12 @@ export const DEFAULT_SELLER_BUDGET: RateLimitBudget = { capacity: 5, refillPerSe
 
 export interface AcquireRequest {
   readonly tenantId: TenantId;
-  readonly channel: ChannelCode;
+  readonly resource: GovernedResource;
   /** Tokens this call costs. A batched detail read costs more than a single list page. */
   readonly cost?: number;
 }
 
-export type RescheduleReason = "app_budget" | "seller_budget" | "channel_cooldown";
+export type RescheduleReason = "app_budget" | "seller_budget" | "resource_cooldown";
 
 export type AcquireDecision =
   | { readonly kind: "allowed"; readonly remainingApp: number; readonly remainingSeller: number }
@@ -88,12 +97,12 @@ class TokenBucket {
   }
 }
 
-function appKey(channel: ChannelCode): string {
-  return `app:${channel}`;
+function appKey(resource: GovernedResource): string {
+  return `app:${resource}`;
 }
 
-function sellerKey(tenantId: TenantId, channel: ChannelCode): string {
-  return `seller:${tenantId}:${channel}`;
+function sellerKey(tenantId: TenantId, resource: GovernedResource): string {
+  return `seller:${tenantId}:${resource}`;
 }
 
 /**
@@ -104,11 +113,11 @@ function sellerKey(tenantId: TenantId, channel: ChannelCode): string {
  * drain the budget for the calls that could have succeeded.
  */
 export class RateLimitGovernor {
-  readonly #appBudgets: Readonly<Partial<Record<ChannelCode, RateLimitBudget>>>;
+  readonly #appBudgets: Readonly<Partial<Record<GovernedResource, RateLimitBudget>>>;
   readonly #sellerBudget: RateLimitBudget;
   readonly #now: () => number;
   readonly #buckets = new Map<string, TokenBucket>();
-  /** Channel-wide pause, set from a `Retry-After` the marketplace sent. */
+  /** Resource-wide pause, set from a `Retry-After` the external API sent. */
   readonly #cooldownUntil = new Map<string, number>();
 
   constructor(options: GovernorOptions) {
@@ -125,20 +134,20 @@ export class RateLimitGovernor {
     }
 
     const nowMs = this.#now();
-    const channel = request.channel;
-    const budget = this.#appBudgets[channel];
+    const resource = request.resource;
+    const budget = this.#appBudgets[resource];
     if (budget === undefined) {
       // No configured budget is not "unlimited": that would silently make the platform the abuser.
       return { kind: "reschedule", retryAfterMs: 60_000, reason: "app_budget" };
     }
 
-    const cooldown = this.#cooldownUntil.get(appKey(channel));
+    const cooldown = this.#cooldownUntil.get(appKey(resource));
     if (cooldown !== undefined && cooldown > nowMs) {
-      return { kind: "reschedule", retryAfterMs: cooldown - nowMs, reason: "channel_cooldown" };
+      return { kind: "reschedule", retryAfterMs: cooldown - nowMs, reason: "resource_cooldown" };
     }
 
-    const app = this.#bucket(appKey(channel), budget, nowMs);
-    const seller = this.#bucket(sellerKey(request.tenantId, channel), this.#sellerBudget, nowMs);
+    const app = this.#bucket(appKey(resource), budget, nowMs);
+    const seller = this.#bucket(sellerKey(request.tenantId, resource), this.#sellerBudget, nowMs);
 
     // Evaluate both before consuming either. Consuming the app bucket and then discovering the
     // seller is blocked would silently spend shared capacity on a call that never happens.
@@ -156,30 +165,30 @@ export class RateLimitGovernor {
   /**
    * Record a rate-limit response that escaped the governor's own accounting.
    *
-   * A `Retry-After` from the marketplace is authoritative: the marketplace knows its own state and
-   * we may be sharing the app key with traffic the governor never saw. The channel is paused for
-   * that long so every tenant waits, rather than each retrying into the same wall.
+   * A `Retry-After` from the external API is authoritative: it knows its own state and we may be
+   * sharing the app key with traffic the governor never saw. The resource is paused for that long so
+   * every tenant waits, rather than each retrying into the same wall.
    */
-  recordRateLimited(channel: ChannelCode, retryAfterSeconds: number | null): void {
+  recordRateLimited(resource: GovernedResource, retryAfterSeconds: number | null): void {
     const seconds = retryAfterSeconds !== null && retryAfterSeconds > 0 ? retryAfterSeconds : 1;
     const nowMs = this.#now();
     const until = nowMs + seconds * 1000;
-    const existing = this.#cooldownUntil.get(appKey(channel)) ?? 0;
-    this.#cooldownUntil.set(appKey(channel), Math.max(existing, until));
+    const existing = this.#cooldownUntil.get(appKey(resource)) ?? 0;
+    this.#cooldownUntil.set(appKey(resource), Math.max(existing, until));
   }
 
   /** Current remaining budget, for an ops readout and for tests. Does not consume. */
-  snapshot(tenantId: TenantId, channel: ChannelCode): {
+  snapshot(tenantId: TenantId, resource: GovernedResource): {
     appRemaining: number | null;
     sellerRemaining: number;
     cooldownMs: number;
   } {
     const nowMs = this.#now();
-    const budget = this.#appBudgets[channel];
-    const cooldown = this.#cooldownUntil.get(appKey(channel)) ?? 0;
+    const budget = this.#appBudgets[resource];
+    const cooldown = this.#cooldownUntil.get(appKey(resource)) ?? 0;
     return {
-      appRemaining: budget === undefined ? null : this.#bucket(appKey(channel), budget, nowMs).remaining,
-      sellerRemaining: this.#bucket(sellerKey(tenantId, channel), this.#sellerBudget, nowMs).remaining,
+      appRemaining: budget === undefined ? null : this.#bucket(appKey(resource), budget, nowMs).remaining,
+      sellerRemaining: this.#bucket(sellerKey(tenantId, resource), this.#sellerBudget, nowMs).remaining,
       cooldownMs: Math.max(0, cooldown - nowMs)
     };
   }

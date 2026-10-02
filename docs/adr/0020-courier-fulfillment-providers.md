@@ -4,10 +4,14 @@
 - **Date:** 2026-09-26
 - **Deciders:** Cofy platform engineering
 
-> Approval note: the courier-neutral contracts, the pure rate-shopping rule and `packages/courier-sdk`
-> are additive and are built now. Two pieces are **not** built until a human approves them: the
-> `ChannelConnector` tracking write-back (extends the interface frozen by ADR 0005/0009/0015) and the
-> `connector:*` boundary allowance for `courier-sdk`. This ADR is the approval request for both.
+> Approval note: the courier-neutral contracts, the pure rate-shopping rule, `packages/courier-sdk`
+> and the integration plane's courier provider surface are additive and are built now (the surface is
+> proven with in-test providers in `apps/services/integration-plane/test/couriers.test.ts`; a real
+> provider waits on a vendored courier SDK, ADR 0007). Two pieces are **not** built until a human
+> approves them: the `ChannelConnector` tracking write-back (extends the interface frozen by
+> ADR 0005/0009/0015) and, if a courier ever needs a top-level `couriers/` zone, that layout change.
+> The `connector:*` boundary allowance for `courier-sdk` is the one line in
+> `tooling/boundaries/src/config.js` this ADR already records as accepted; it is applied.
 
 ## Context
 

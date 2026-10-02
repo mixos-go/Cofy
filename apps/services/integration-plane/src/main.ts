@@ -21,7 +21,7 @@ import { ShopeeConnector, defaultShopeeConfig } from "@platform/connector-shopee
 import { loadConfig } from "./config.ts";
 import { InMemoryOAuthStateStore } from "./oauth-state.ts";
 import { createIntegrationPlaneServer } from "./http.ts";
-import type { RegisteredChannel } from "./types.ts";
+import type { CourierKeyResolver, RegisteredChannel, RegisteredCourier } from "./types.ts";
 
 async function main(): Promise<void> {
   const logger = createLogger((process.env.LOG_LEVEL as LogLevel | undefined) ?? "info");
@@ -53,21 +53,46 @@ async function main(): Promise<void> {
     });
   }
 
+  // Courier providers are wired here like connectors (docs/adr/0020). A courier with a key but no
+  // provider is a configuration gap, not a silent absence, so it is logged. Providers themselves
+  // land as their vendored SDKs are sourced (ADR 0007); until then this list is empty and the
+  // courier surface answers honestly that it serves none.
+  const couriers: RegisteredCourier[] = [];
+  const configuredCouriers = Object.keys(config.courierKeys);
+  if (configuredCouriers.length > 0) {
+    logger.warn("startup.couriers_without_provider", { couriers: configuredCouriers });
+  }
+
+  const courierKeys: CourierKeyResolver = {
+    get: (courier) => {
+      const apiKey = config.courierKeys[courier];
+      return apiKey === undefined
+        ? null
+        : { courier, apiKey, context: {} };
+    }
+  };
+
   const server = createIntegrationPlaneServer({
     credentials,
     channels,
+    couriers,
+    courierKeys,
     publicBaseUrl: config.publicBaseUrl,
     oauthStates: new InMemoryOAuthStateStore(),
     serviceTokens: config.serviceTokens,
-    // One governor for the whole process, shared across tenants and channels: the marketplace
-    // limit is per app key and we own one app each (ADR 0002). In-memory is correct for a single
-    // instance; the Redis-backed state lands behind the same interface before scaling out.
+    // One governor for the whole process, shared across tenants, channels and couriers: the
+    // limit is per app key and we own one app each (ADR 0002, docs/adr/0020). In-memory is correct
+    // for a single instance; the Redis-backed state lands behind the same interface before scaling out.
     governor: new RateLimitGovernor({ appBudgets: config.rateBudgets }),
     logger
   });
 
   server.listen(config.port, () => {
-    logger.info("startup.listening", { port: config.port, channels: channels.map((c) => c.channel) });
+    logger.info("startup.listening", {
+      port: config.port,
+      channels: channels.map((c) => c.channel),
+      couriers: couriers.map((c) => c.courier)
+    });
   });
 
   const shutdown = (): void => {

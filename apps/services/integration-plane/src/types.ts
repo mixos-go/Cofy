@@ -10,7 +10,8 @@
  */
 
 import type { ChannelConnector } from "@platform/channel-sdk";
-import type { ChannelCode } from "@platform/contracts";
+import type { CourierProvider, CourierCredential } from "@platform/courier-sdk";
+import type { ChannelCode, CourierCode } from "@platform/contracts";
 import type { RateLimitGovernor } from "@platform/rate-governor";
 import type { CredentialStore } from "@platform/secrets";
 import type { Logger } from "@platform/observability";
@@ -22,10 +23,35 @@ export interface RegisteredChannel {
   readonly connector: ChannelConnector;
 }
 
+/** A courier provider, keyed by the courier it serves (docs/adr/0020). */
+export interface RegisteredCourier {
+  readonly courier: CourierCode;
+  readonly provider: CourierProvider;
+}
+
+/**
+ * Resolves the platform-owned credential for a courier.
+ *
+ * A courier key is the platform's, not a seller's (ADR 0003), so it does not live in the per-tenant
+ * `CredentialStore` the channels use. Keeping this an interface means the plane holds no key of its
+ * own: `main.ts` builds the resolver from configuration, and a test builds one from a literal.
+ * Nothing in the plane reads a key except through here.
+ */
+export interface CourierKeyResolver {
+  get(courier: CourierCode): CourierCredential | null;
+}
+
 export interface IntegrationPlaneOptions {
   /** Where seller credentials live (docs/adr/0003). Shared with the control plane's secret store. */
   readonly credentials: CredentialStore;
   readonly channels: readonly RegisteredChannel[];
+  /**
+   * Courier providers, wired like connectors (docs/adr/0020). Empty is honest: a plane with no
+   * courier configured quotes nothing rather than pretending to ship.
+   */
+  readonly couriers: readonly RegisteredCourier[];
+  /** Platform-owned courier keys, resolved per call. Never stored in the tenant credential store. */
+  readonly courierKeys: CourierKeyResolver;
   /**
    * The public origin this service is reachable at. The OAuth redirect URI is derived from it, so
    * the value registered with every marketplace app comes from one place.

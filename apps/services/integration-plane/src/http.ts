@@ -13,11 +13,13 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { PlatformError, RateLimitedError, httpStatusFor, asChannelCode } from "@platform/contracts";
-import type { ChannelCode } from "@platform/contracts";
+import { PlatformError, RateLimitedError, httpStatusFor, asChannelCode, asCourierCode, SERVICE_LEVELS } from "@platform/contracts";
+import type { ChannelCode, CourierCode, ShipmentQuote } from "@platform/contracts";
 import type { ChannelConnector } from "@platform/channel-sdk";
+import type { CourierCredential } from "@platform/courier-sdk";
 import { z } from "zod";
 import { ChannelRegistry } from "./channels.ts";
+import { CourierRegistry } from "./couriers.ts";
 import type { IntegrationPlaneOptions } from "./types.ts";
 
 type AuthRequirement = { readonly kind: "public" } | { readonly kind: "service" };
@@ -79,6 +81,56 @@ const stockPushBody = z.object({
     .max(200)
 });
 
+/**
+ * A shipment request in courier-neutral terms (docs/adr/0020).
+ *
+ * Deliberately not a courier's shape: the provider maps this into its own API. `weightGrams` is an
+ * integer because couriers bill on whole grams, and a float here would round differently in every
+ * provider.
+ */
+const shipmentRequestBody = z.object({
+  orderId: z.string().min(1).max(128),
+  destination: z.object({
+    city: z.string().min(1).max(128),
+    postalCode: z.string().min(1).max(16).nullable().default(null),
+    address: z.string().min(1).max(512)
+  }),
+  weightGrams: z.number().int().positive(),
+  declaredValue: z.object({ amount: z.number().int().nonnegative(), currency: z.literal("IDR") }),
+  requiresInsurance: z.boolean().default(false),
+  requiresCod: z.boolean().default(false)
+});
+
+const quoteBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  shipment: shipmentRequestBody,
+  /** Couriers to price. Empty/absent means every registered courier. */
+  couriers: z.array(z.string().min(1)).max(16).optional()
+});
+
+const serviceLevelSchema = z.enum(SERVICE_LEVELS);
+
+const shipmentQuoteSchema = z.object({
+  courier: z.string().min(1),
+  serviceLevel: serviceLevelSchema,
+  price: z.object({ amount: z.number().int().nonnegative(), currency: z.literal("IDR") }),
+  estimatedDays: z.object({ min: z.number().int().nonnegative(), max: z.number().int().nonnegative() }),
+  supportsInsurance: z.boolean(),
+  supportsCod: z.boolean(),
+  providerQuoteId: z.string().min(1)
+});
+
+const createShipmentBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  quote: shipmentQuoteSchema,
+  shipment: shipmentRequestBody
+});
+
+const trackingBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  trackingNumber: z.string().min(1).max(128)
+});
+
 /** Load the credential for a tenant and channel, or fail as disconnected. */
 async function credentialFor(
   options: IntegrationPlaneOptions,
@@ -137,7 +189,7 @@ async function callChannel<T>(
   tenantId: string,
   call: () => Promise<T>
 ): Promise<T> {
-  const decision = options.governor.acquire({ tenantId, channel });
+  const decision = options.governor.acquire({ tenantId, resource: channel });
   if (decision.kind === "reschedule") {
     const retryAfterSeconds = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
     options.logger.info("channel.rate_limited", {
@@ -166,9 +218,78 @@ async function callChannel<T>(
   }
 }
 
+/**
+ * Run one courier call under the same governor (docs/adr/0020).
+ *
+ * Identical accounting to a channel call: a courier's limit is per app key and the platform owns one
+ * key, so a denial becomes a `RateLimitedError` the worker reschedules on, and a courier's own
+ * `Retry-After` pauses the courier for every tenant. Sharing the governor is the point — a second
+ * copy of this logic is how one copy silently drifts from the other.
+ */
+async function callCourier<T>(
+  options: IntegrationPlaneOptions,
+  courier: CourierCode,
+  tenantId: string,
+  call: () => Promise<T>
+): Promise<T> {
+  const decision = options.governor.acquire({ tenantId, resource: courier });
+  if (decision.kind === "reschedule") {
+    const retryAfterSeconds = Math.max(1, Math.ceil(decision.retryAfterMs / 1000));
+    options.logger.info("courier.rate_limited", {
+      tenantId,
+      courier,
+      reason: decision.reason,
+      retryAfterSeconds
+    });
+    throw new RateLimitedError(
+      `Rate limit for ${courier}: ${decision.reason}.`,
+      retryAfterSeconds,
+      { reason: decision.reason, retryAfterSeconds }
+    );
+  }
+
+  try {
+    return await call();
+  } catch (error) {
+    if (error instanceof RateLimitedError) {
+      options.governor.recordRateLimited(courier, error.retryAfterSeconds);
+    }
+    throw error;
+  }
+}
+
+/**
+ * The platform-owned key for a courier, or a non-retryable error.
+ *
+ * A missing key means the courier is registered but not configured — an operator mistake, not a
+ * seller's, so it fails loudly rather than looking like "no quotes".
+ */
+function courierCredentialFor(
+  options: IntegrationPlaneOptions,
+  courier: CourierCode
+): CourierCredential {
+  const credential = options.courierKeys.get(courier);
+  if (credential === null) {
+    throw new PlatformError("VALIDATION_FAILED", `No credential is configured for ${courier}.`, {
+      details: { courier }
+    });
+  }
+  return credential;
+}
+
+function courierParam(params: Readonly<Record<string, string>>): CourierCode {
+  const raw = params.courier;
+  const courier = raw === undefined ? null : asCourierCode(raw);
+  if (courier === null) {
+    throw new PlatformError("NOT_FOUND", "Unknown courier.", { details: { courier: raw } });
+  }
+  return courier;
+}
+
 export function createRoutes(
   options: IntegrationPlaneOptions,
-  registry: ChannelRegistry
+  registry: ChannelRegistry,
+  couriers: CourierRegistry
 ): readonly Route[] {
   const now = options.now ?? (() => new Date());
 
@@ -179,7 +300,8 @@ export function createRoutes(
       auth: { kind: "public" },
       handler: async () => ({
         status: "ok",
-        channels: registry.channels()
+        channels: registry.channels(),
+        couriers: couriers.couriers()
       })
     },
     {
@@ -391,8 +513,132 @@ export function createRoutes(
         );
         return { items: page.items, nextCursor: page.next.value };
       }
+    },
+    {
+      // Every courier this plane can quote, and what each supports. Credential-free: capabilities
+      // are a property of the platform's app registration (docs/adr/0003), so the worker can read
+      // them before any key is configured and the seller UI can show the matrix (M8 deliverable).
+      method: "POST",
+      path: "/v1/couriers/capabilities",
+      auth: { kind: "service" },
+      handler: async () => ({
+        couriers: couriers.all().map((entry) => ({
+          courier: entry.courier,
+          capabilities: entry.provider.capabilities()
+        }))
+      })
+    },
+    {
+      // Price one shipment across the couriers named, in courier-neutral terms.
+      //
+      // This is a fan-out, not a rate-shopping decision: it returns every quote it collected and
+      // the caller applies `selectCourier` (docs/adr/0020). A courier that fails to quote is
+      // reported in `failures` rather than failing the whole request — one courier being down must
+      // not stop the seller shipping with another.
+      method: "POST",
+      path: "/v1/couriers/quotes",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const parsed = quoteBody.parse(body);
+        const requested =
+          parsed.couriers === undefined || parsed.couriers.length === 0
+            ? couriers.couriers()
+            : parsed.couriers.map((raw) => courierParam({ courier: raw }));
+
+        const quotes: ShipmentQuote[] = [];
+        const failures: { courier: CourierCode; reason: string }[] = [];
+        for (const courier of requested) {
+          const provider = couriers.require(courier).provider;
+          try {
+            const credential = courierCredentialFor(options, courier);
+            const priced = await callCourier(options, courier, parsed.tenantId, () =>
+              provider.quote(parsed.shipment, credential)
+            );
+            quotes.push(...priced);
+          } catch (error) {
+            // A rate limit is not "this courier is broken": it is "come back later". Swallowing it
+            // into `failures` would hand the caller a partial answer and lose the retry hint, so it
+            // propagates and the worker reschedules the whole fan-out.
+            if (error instanceof RateLimitedError) throw error;
+            failures.push({ courier, reason: failureReason(error) });
+          }
+        }
+        return { quotes, failures };
+      }
+    },
+    {
+      // Book one shipment for an already-chosen quote. The caller passes the quote back so the
+      // provider books the exact service that was priced; the quote is the audit's chosen value.
+      method: "POST",
+      path: "/v1/couriers/:courier/shipments",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = createShipmentBody.parse(body);
+        const courier = courierParam(params);
+        // The quote is echoed back from a prior quote call, so its courier must be the one in the
+        // path: booking courier B for a quote that named courier A would bill a service that was
+        // never priced. Narrow the echoed string to a real code and refuse a mismatch.
+        const quotedCourier = asCourierCode(parsed.quote.courier);
+        if (quotedCourier === null || quotedCourier !== courier) {
+          throw new PlatformError("VALIDATION_FAILED", "The quote does not belong to this courier.", {
+            details: { courier, quotedCourier: parsed.quote.courier }
+          });
+        }
+        const provider = couriers.require(courier).provider;
+        const credential = courierCredentialFor(options, courier);
+        const quote: ShipmentQuote = { ...parsed.quote, courier: quotedCourier };
+        const shipment = await callCourier(options, courier, parsed.tenantId, () =>
+          provider.createShipment(quote, parsed.shipment, credential)
+        );
+        return { shipment };
+      }
+    },
+    {
+      // The tracking events for one shipment, oldest first. A pull, like stock (ADR 0002): the
+      // worker's track pass walks active shipments and asks here, so freshness is cadence-bound.
+      method: "POST",
+      path: "/v1/couriers/:courier/tracking",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = trackingBody.parse(body);
+        const courier = courierParam(params);
+        const provider = couriers.require(courier).provider;
+        const credential = courierCredentialFor(options, courier);
+        const events = await callCourier(options, courier, parsed.tenantId, () =>
+          provider.track(parsed.trackingNumber, credential)
+        );
+        return { events };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/couriers/:courier/shipments/cancel",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = trackingBody.parse(body);
+        const courier = courierParam(params);
+        const provider = couriers.require(courier).provider;
+        const credential = courierCredentialFor(options, courier);
+        await callCourier(options, courier, parsed.tenantId, () =>
+          provider.cancelShipment(parsed.trackingNumber, credential)
+        );
+        return { cancelled: true, courier, trackingNumber: parsed.trackingNumber };
+      }
     }
   ];
+}
+
+/**
+ * A seller-readable cause for a courier failure, without leaking the courier's raw error body.
+ *
+ * A rate limit is named so the worker can tell "retry later" from "this will never work"; anything
+ * else is a generic cause, because a raw upstream message is not actionable to a seller and may
+ * carry internals we should not surface.
+ */
+function failureReason(error: unknown): string {
+  if (error instanceof RateLimitedError) return "rate_limited";
+  if (error instanceof PlatformError) return error.code;
+  return "courier_error";
 }
 
 function matchPath(pattern: string, path: string): Record<string, string> | null {
@@ -470,7 +716,8 @@ function isAuthorizedServiceToken(presented: string | null, allowed: readonly st
 
 export function createIntegrationPlaneServer(options: IntegrationPlaneOptions): Server {
   const registry = new ChannelRegistry(options.channels);
-  const routes = createRoutes(options, registry);
+  const couriers = new CourierRegistry(options.couriers);
+  const routes = createRoutes(options, registry, couriers);
 
   return createServer((request, response) => {
     void handle(request, response, routes, options).catch(() => {

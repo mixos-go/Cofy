@@ -100,6 +100,20 @@ test("rate budgets default to a conservative per-channel value rather than none"
   // An empty budget map would block every channel; the default must be a real allowance.
   assert.ok(config.rateBudgets.tiktok_tokopedia);
   assert.ok(config.rateBudgets.shopee);
+  // Couriers are governed on the same budgets, so they need a default too (docs/adr/0020).
+  assert.ok(config.rateBudgets.jne);
+});
+
+test("courier keys are read per courier and an unset courier is simply absent", () => {
+  const config = loadConfig({
+    ...BASE_ENV,
+    JNE_API_KEY: "jne-key",
+    SICEPAT_API_KEY: "sicepat-key"
+  });
+
+  // No key means "not configured", not an empty string that a provider would send as a credential.
+  assert.equal(config.courierKeys.jnt, undefined);
+  assert.deepEqual(config.courierKeys, { jne: "jne-key", sicepat: "sicepat-key" });
 });
 
 test("rate budgets are parsed from the environment when provided", () => {

@@ -279,11 +279,11 @@ test("a crash mid-pass is a non-event: the resumed pass re-reads from the commit
 
 test("deferralFor reads the governor's Retry-After and ignores a non-rate-limit error", () => {
   const deferral = deferralFor(
-    new RateLimitedError("slow down", 45, { reason: "channel_cooldown", retryAfterSeconds: 45 }),
+    new RateLimitedError("slow down", 45, { reason: "resource_cooldown", retryAfterSeconds: 45 }),
     NOW
   );
   assert.equal(deferral?.runAt, new Date(NOW.getTime() + 45_000).toISOString());
-  assert.equal(deferral?.reason, "channel_cooldown");
+  assert.equal(deferral?.reason, "resource_cooldown");
 
   assert.equal(deferralFor(new Error("boom"), NOW), null);
 });

@@ -18,6 +18,7 @@
     "@platform/connector-shopee": "workspace:*",
     "@platform/connector-tiktok-tokopedia": "workspace:*",
     "@platform/contracts": "workspace:*",
+    "@platform/courier-sdk": "workspace:*",
     "@platform/observability": "workspace:*",
     "@platform/rate-governor": "workspace:*",
     "@platform/secrets": "workspace:*",

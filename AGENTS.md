@@ -433,6 +433,17 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   The same reasoning forces a deterministic tie-break: without one, quotes equal on price and transit
   would be ordered by input position, and a caller that collected them concurrently would choose a
   different courier run to run — an audit that cannot be reproduced is not an audit.
+- **A fan-out reports per-target failures but never swallows a rate limit.** The courier quote route
+  prices several couriers in one request and collects a failing courier into `failures` so one being
+  down does not stop the seller shipping with another — but a `RateLimitedError` is rethrown, not
+  collected. It is not "this courier is broken", it is "come back later": folding it into the failure
+  list would hand the caller a partial answer and drop the retry hint the worker reschedules on
+  (docs/adr/0002). The same distinction applies to any future fan-out.
+- **The governor is keyed by resource, and a courier is a resource.** `RateLimitGovernor` governs a
+  `GovernedResource` (`ChannelCode | CourierCode`) with one budget per key, so a courier's limit and
+  a channel's limit are separate buckets spent the same way. Do not add a second governor for
+  couriers: two copies of the acquire/deny/`recordRateLimited` logic is how one copy silently drifts
+  from the other (docs/adr/0020).
 - **Repair must reopen a failed ref *inside* the pull, not in a loop before it.** Reopening every
   `failed` ref and then re-counting makes the drift number fall to zero for orders the channel's
   current page no longer returns — the dashboard reads healthy while the order is still missing,

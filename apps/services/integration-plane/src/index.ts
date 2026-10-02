@@ -8,6 +8,7 @@
 
 export * from "./types.ts";
 export * from "./channels.ts";
+export * from "./couriers.ts";
 export * from "./oauth-state.ts";
 export * from "./config.ts";
 export * from "./http.ts";

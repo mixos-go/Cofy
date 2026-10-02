@@ -176,6 +176,8 @@ async function startHarness(
   const server = createIntegrationPlaneServer({
     credentials,
     channels,
+    couriers: [],
+    courierKeys: { get: () => null },
     publicBaseUrl: PUBLIC_BASE_URL,
     oauthStates: states,
     serviceTokens: [SERVICE_TOKEN],
