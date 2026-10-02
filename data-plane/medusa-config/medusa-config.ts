@@ -46,6 +46,10 @@ export function databaseSslOptions(
  *
  * `channel-order-link` is registered with `resolve` + `isQueryable` so that the module link in the
  * module's `src/links/` can join it to the core Order module (ADR 0010).
+ *
+ * `wms` and `purchase-order` are registered the same way (M6). Each holds its own tables and
+ * reaches core modules by id — `wms_warehouse.stock_location_id` names the location its bins
+ * subdivide — never by a column added to a core table (docs/adr/0018).
  */
 export default defineConfig({
   // A tenant instance serves the Admin *API* our worker and control plane call; it never serves
@@ -90,6 +94,18 @@ export default defineConfig({
     // bare directory containing `src/` as a package root, so `.../src` would fail to resolve.
     channelOrderLink: {
       resolve: "../modules/channel-order-link/src/index.ts",
+      definition: {
+        isQueryable: true
+      }
+    },
+    wms: {
+      resolve: "../modules/wms/src/index.ts",
+      definition: {
+        isQueryable: true
+      }
+    },
+    purchaseOrder: {
+      resolve: "../modules/purchase-order/src/index.ts",
       definition: {
         isQueryable: true
       }

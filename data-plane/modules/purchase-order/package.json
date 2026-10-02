@@ -1,0 +1,24 @@
+{
+  "name": "@platform/purchase-order",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Medusa data-plane module: inbound purchase orders and their receiving progress. Runs inside each tenant's Medusa instance (ADR 0010, ADR 0018).",
+  "exports": {
+    ".": "./src/index.ts",
+    "./links/*": "./src/links/*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test:integration": "node --test test/integration/*.test.ts"
+  },
+  "dependencies": {
+    "@medusajs/framework": "2.21.1"
+  },
+  "devDependencies": {
+    "@medusajs/medusa": "2.21.1",
+    "@medusajs/test-utils": "2.21.1",
+    "@types/node": "^22.10.1",
+    "typescript": "^5.6.3"
+  }
+}

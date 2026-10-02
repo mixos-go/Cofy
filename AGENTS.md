@@ -507,3 +507,43 @@ it. Same rule as §9/§10. Full rationale: `docs/adr/0011`.
   (`git show HEAD:pnpm-lock.yaml | grep -c 'react-dom@18.3.1'`) before believing it: re-keying peer
   suffixes deletes and re-adds the same entries, so the line count moves while the resolution does
   not.
+
+## 12. Lessons from the WMS write path
+
+Hard-won specifics from M6's warehouse modules and their stock write. Same rule as §9–§11. Full
+rationale: `docs/adr/0018`.
+
+- **`medusa db:generate` bakes the *active* `DATABASE_SCHEMA` into the migration SQL, and its
+  `down()` drops that schema.** Generating with `DATABASE_SCHEMA=tenant_gen` produced
+  `create table "tenant_gen"."wms_bin" ...` plus `drop schema if exists "tenant_gen"` — a migration
+  that only ever works for one tenant and, on rollback, destroys the schema every other table lives
+  in. Generate with **no** `DATABASE_SCHEMA` set: the SQL is then unqualified, the same shape
+  Medusa's own module migrations use, and `search_path` decides the schema at run time. The
+  `.snapshot-<module>.json` is also schema-agnostic when generated this way; grep it for the schema
+  name before committing.
+- **`db:generate` takes the module's *registered* name, not its folder name.** `medusa db:generate
+  purchase-order` failed with `Cannot generate migrations for unknown module(s)` and listed the
+  modules it knew, where the key was `purchaseOrder` — the key in `medusa-config`'s `modules` map.
+  A folder named `purchase-order` is unrelated to the key; read the "Available modules" list the
+  error prints rather than guessing.
+- **`adjustInventoryLevelsStep` adjusts an existing level and throws when there is none.** A tenant
+  that sells a SKU it has never stocked at this warehouse fails its first receipt. Resolve the
+  variant's `inventory_item_id` through `product_variant.inventory_items` and create the level at
+  zero first (`createInventoryLevels`), with a compensation that deletes the levels it created — a
+  level created at zero and left behind after a rollback is a phantom row the next run trips over.
+- **Derive a bin quantity from an append-only ledger instead of storing a counter.** A stored
+  quantity read-modify-written by a receipt and a pick racing on the same bin loses one of the two.
+  Summing signed `delta` rows cannot lose a write: both movements are inserted and the sum reflects
+  both. `quantity_before`/`quantity_after` are recorded for the audit trail but nothing reads them
+  back as a current value. The same reasoning makes a stocktake correction a *delta* with the
+  counted number in the reason, not an assignment — which is what "auditable adjustment, never a
+  silent overwrite" requires.
+- **A relocation between bins must not touch the inventory level.** Put-away and pick move units
+  inside one stock location; the level already moved at receipt (and, for a pick, the reservation
+  taken at import already holds the units). Adjusting the level on a relocation makes the warehouse
+  total drift by the moved quantity, and on a pick it double-decrements once fulfillment ships.
+- **Prove a module's migrations with the real CLI before wiring anything to it.** The WMS and
+  purchase-order tables only exist because `db:migrate` ran them; a typecheck passes whether or not
+  the module is registered. The M6 integration test boots a real server, walks receipt → put-away →
+  pick → stocktake over HTTP, and reads `inventory_level.stocked_quantity` out of the tenant schema
+  to show the engine's number and the ledger's number moved together.
