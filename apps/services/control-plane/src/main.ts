@@ -34,6 +34,7 @@ import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
 import { SellerOrderReader } from "./seller-orders.ts";
 import { HttpChannelConnectionClient } from "./channels.ts";
 import { InMemoryAuditLog } from "./audit.ts";
+import { HttpWmsClient } from "./wms.ts";
 import { createTlsTransport, readOptionalCa } from "@platform/http-transport";
 
 async function main(): Promise<void> {
@@ -162,6 +163,15 @@ async function main(): Promise<void> {
     logger
   });
 
+  // The warehouse surface (docs/PLAN.md M6). Same credential, same transport, same rule as the order
+  // read: the tenant's admin key goes from the store into one request header and nowhere else.
+  const wms = new HttpWmsClient({
+    targets: medusaTargets,
+    keys: medusaAdminKeys,
+    transport: createTlsTransport({ ca: readOptionalCa() }),
+    logger
+  });
+
   // Channel connections (docs/PLAN.md M5). The control plane owns the seller session, the
   // integration plane owns the credential; this client joins them over the service-token surface
   // (ADR 0008). The same token the worker presents, so there is one shared secret to rotate.
@@ -182,6 +192,7 @@ async function main(): Promise<void> {
     sellerOrders,
     channelConnections,
     auditLog: new InMemoryAuditLog(),
+    wms,
     logger
   });
   const port = Number(process.env.CONTROL_PLANE_PORT ?? 4001);

@@ -19,6 +19,8 @@
  *   2. A's session cannot read B's order by id, even with the real id in hand — a cross-tenant URL
  *      is not expressible, and a guessed id is still refused.
  *   3. A's sync-health read does not include a problem recorded against B.
+ *   4. A's warehouse, bins, bin contents and ledger are A's own — B's bin id is not found against
+ *      A's instance — so the WMS read is scoped by the session's tenant and not by the URL (M6).
  *
  * Skipped when `TEST_DATABASE_URL` is absent, like the other real-Medusa tests, so `pnpm test` runs
  * without a database; run with `pnpm test:integration`.
@@ -42,6 +44,7 @@ import {
   SellerOrderReader,
   SessionManager,
   HttpChannelConnectionClient,
+  HttpWmsClient,
   InMemoryAuditLog,
   TenantRegistry,
   TenantTerminationService,
@@ -86,6 +89,10 @@ interface TenantFixture {
   readonly externalOrderId: string;
   /** A problem recorded against this tenant only, so sync health can be checked for bleed. */
   readonly failedExternalOrderId: string;
+  /** A warehouse and bin this tenant owns, with a code no other tenant uses. */
+  readonly warehouseId: string;
+  readonly binId: string;
+  readonly binCode: string;
   readonly server: { stop: () => void };
 }
 
@@ -118,6 +125,69 @@ interface HealthBody {
 interface ErrorBody {
   readonly error: { readonly code: string; readonly message: string };
 }
+interface WarehouseBody {
+  readonly id: string;
+  readonly name: string;
+}
+interface WarehouseListBody {
+  readonly warehouses: readonly WarehouseBody[];
+}
+interface BinBody {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly code: string;
+  readonly kind: string;
+}
+interface BinListBody {
+  readonly bins: readonly BinBody[];
+}
+interface BinContentsBody {
+  readonly binId: string;
+  readonly code: string;
+  readonly contents: readonly { readonly sku: string; readonly quantity: number }[];
+}
+interface MovementListBody {
+  readonly movements: readonly { readonly id: string; readonly binId: string; readonly kind: string }[];
+}
+
+/**
+ * Seeds one warehouse with a single storage bin through the tenant's own Admin API, using that
+ * tenant's secret key directly.
+ *
+ * The control plane is deliberately not involved: this is the data the *engine* holds, so a
+ * cross-tenant read failure can only be the control plane picking the wrong instance, not the
+ * fixture having put the wrong thing there. Each tenant gets a distinct bin code, which is what
+ * makes "whose bin came back" answerable from the response alone.
+ */
+async function seedWarehouse(input: {
+  readonly baseUrl: string;
+  readonly secretKey: string;
+  readonly code: string;
+}): Promise<{ readonly warehouseId: string; readonly binId: string }> {
+  const auth = `Basic ${Buffer.from(`${input.secretKey}:`).toString("base64")}`;
+  const post = async <T>(path: string, body: unknown): Promise<T> => {
+    const response = await fetch(`${input.baseUrl}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: auth },
+      body: JSON.stringify(body)
+    });
+    const text = await response.text();
+    assert.ok(response.ok, `seeding ${path} failed (${response.status}): ${text.slice(0, 500)}`);
+    return JSON.parse(text) as T;
+  };
+
+  const warehouse = (
+    await post<{ warehouse: { id: string } }>("/admin/wms/warehouses", { name: `Gudang ${input.code}` })
+  ).warehouse;
+  const bin = (
+    await post<{ bin: { id: string } }>("/admin/wms/bins", {
+      warehouseId: warehouse.id,
+      code: input.code,
+      kind: "storage"
+    })
+  ).bin;
+  return { warehouseId: warehouse.id, binId: bin.id };
+}
 
 /**
  * Migrates vanilla Medusa into a fresh tenant schema through the runner provisioning uses, seeds one
@@ -136,6 +206,7 @@ async function prepareTenant(input: {
   readonly channel: ChannelCode;
   readonly externalOrderId: string;
   readonly failedExternalOrderId: string;
+  readonly binCode: string;
   readonly schemaAdmin: PostgresTenantSchemaAdmin;
 }): Promise<TenantFixture> {
   await input.schemaAdmin.createSchema(input.schemaName);
@@ -172,6 +243,14 @@ async function prepareTenant(input: {
 
   const server = await startServer(env, input.port, 180_000);
 
+  // The warehouse is seeded through the tenant's own Admin API once the instance is up, so the
+  // control-plane read that follows has a real, tenant-owned bin to find or fail to find.
+  const warehouse = await seedWarehouse({
+    baseUrl: `http://127.0.0.1:${input.port}`,
+    secretKey: seeded.secretKey,
+    code: input.binCode
+  });
+
   return {
     tenantId: input.tenantId,
     baseUrl: `http://127.0.0.1:${input.port}`,
@@ -182,6 +261,9 @@ async function prepareTenant(input: {
     channel: input.channel,
     externalOrderId: input.externalOrderId,
     failedExternalOrderId: input.failedExternalOrderId,
+    warehouseId: warehouse.warehouseId,
+    binId: warehouse.binId,
+    binCode: input.binCode,
     server
   };
 }
@@ -224,6 +306,7 @@ test(
       channel: "shopee",
       externalOrderId: "alpha-ext-1",
       failedExternalOrderId: "alpha-ext-failed",
+      binCode: "ALPHA-A-01",
       schemaAdmin
     });
     instances.push(alpha);
@@ -237,6 +320,7 @@ test(
       channel: "tiktok_tokopedia",
       externalOrderId: "beta-ext-1",
       failedExternalOrderId: "beta-ext-failed",
+      binCode: "BETA-B-02",
       schemaAdmin
     });
     instances.push(beta);
@@ -319,6 +403,16 @@ test(
       logger: silentLogger
     });
 
+    // The warehouse surface, built the way production builds it and against the same real
+    // transports. A tenant's WMS tables live in its own schema, so the isolation claim is about
+    // which instance answers and can only be proven against two real instances.
+    const wms = new HttpWmsClient({
+      targets,
+      keys,
+      transport: fetch,
+      logger: silentLogger
+    });
+
     controlPlane.server = createControlPlaneServer({
       registry,
       provisioning,
@@ -330,6 +424,7 @@ test(
       sellerOrders,
       channelConnections,
       auditLog: new InMemoryAuditLog(),
+      wms,
       logger
     });
     await new Promise<void>((resolve) => controlPlane.server!.listen(0, resolve));
@@ -421,6 +516,76 @@ test(
       assert.equal(betaView.problems[0]?.externalOrderId, beta.failedExternalOrderId);
       // The explanation is prose, not the internal kind: the seller gets an action, not a code.
       assert.match(betaView.problems[0]?.explanation ?? "", /could not be imported/);
+    });
+
+    await t.test("each seller reads its own warehouse and never another tenant's", async () => {
+      // A's warehouses and bins are A's own, and carry A's codes only.
+      const alphaWarehouses = await get<WarehouseListBody>(alphaToken, "/v1/seller/wms/warehouses");
+      assert.equal(alphaWarehouses.status, 200);
+      assert.ok(
+        alphaWarehouses.body.warehouses.some((warehouse) => warehouse.id === alpha.warehouseId),
+        "tenant A must see its own warehouse"
+      );
+      assert.ok(
+        !JSON.stringify(alphaWarehouses.body).includes(beta.warehouseId),
+        "tenant A's warehouse list must not contain tenant B's warehouse"
+      );
+
+      const alphaBins = await get<BinListBody>(alphaToken, "/v1/seller/wms/bins");
+      assert.equal(alphaBins.status, 200);
+      const alphaBin = alphaBins.body.bins.find((bin) => bin.id === alpha.binId);
+      assert.ok(alphaBin, "tenant A must see its own bin");
+      assert.equal(alphaBin.code, alpha.binCode);
+      assert.ok(
+        !JSON.stringify(alphaBins.body).includes(beta.binCode),
+        "tenant A's bin list must not contain tenant B's bin code"
+      );
+
+      // The same from the other side, so a bug that pinned every read to one instance cannot pass
+      // by leaving one direction correct.
+      const betaWarehouses = await get<WarehouseListBody>(betaToken, "/v1/seller/wms/warehouses");
+      assert.ok(betaWarehouses.body.warehouses.some((warehouse) => warehouse.id === beta.warehouseId));
+      assert.ok(!JSON.stringify(betaWarehouses.body).includes(alpha.warehouseId));
+      const betaBins = await get<BinListBody>(betaToken, "/v1/seller/wms/bins");
+      const betaBin = betaBins.body.bins.find((bin) => bin.id === beta.binId);
+      assert.ok(betaBin, "tenant B must see its own bin");
+      assert.equal(betaBin.code, beta.binCode);
+      assert.ok(!JSON.stringify(betaBins.body).includes(alpha.binCode));
+    });
+
+    await t.test("a seller reading another tenant's bin or ledger is refused, not served", async () => {
+      // A's own bin resolves and reports A's own code.
+      const ownContents = await get<BinContentsBody>(alphaToken, `/v1/seller/wms/bins/${alpha.binId}/contents`);
+      assert.equal(ownContents.status, 200);
+      assert.equal(ownContents.body.code, alpha.binCode);
+
+      // B's real bin id, held by A's session, is not found against A's instance. The id is not
+      // addressable across tenants even when the caller knows it.
+      const crossContents = await get<ErrorBody>(alphaToken, `/v1/seller/wms/bins/${beta.binId}/contents`);
+      assert.equal(crossContents.status, 404);
+      assert.equal(crossContents.body.error.code, "NOT_FOUND");
+
+      // And the ledger read, which takes a bin id from the query, is answered from A's own instance:
+      // B's bin does not exist there, so its ledger is empty rather than B's. The route deliberately
+      // does not 404 an unknown bin (an empty ledger is a legitimate answer), so the isolation claim
+      // is the absence of B's movements, not a status.
+      const crossLedger = await get<MovementListBody>(
+        alphaToken,
+        `/v1/seller/wms/stock-movements?binId=${beta.binId}`
+      );
+      assert.equal(crossLedger.status, 200);
+      assert.equal(
+        crossLedger.body.movements.length,
+        0,
+        "tenant A must not see any of tenant B's movements for B's bin"
+      );
+
+      // B's own ledger still reads, so the refusal is about the tenant and not a broken route.
+      const betaLedger = await get<MovementListBody>(
+        betaToken,
+        `/v1/seller/wms/stock-movements?binId=${beta.binId}`
+      );
+      assert.equal(betaLedger.status, 200);
     });
   }
 );

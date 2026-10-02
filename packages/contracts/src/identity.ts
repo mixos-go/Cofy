@@ -34,6 +34,11 @@ export const CAPABILITIES = [
   "order:read",
   "order:write",
   "stock:write",
+  // The warehouse surface (docs/PLAN.md M6, ADR 0018). Kept apart from `stock:write` on purpose:
+  // that capability is about pushing a number to a marketplace, while these are about moving units
+  // between bins. A seat trusted to push stock is not automatically trusted to run a stocktake.
+  "wms:read",
+  "wms:write",
   "user:invite",
   "user:remove",
   // Operator-only. Kept out of every `seller_*` role so the ops surface is unreachable with a
@@ -58,11 +63,13 @@ export const ROLE_CAPABILITIES: Readonly<Record<Role, readonly Capability[]>> = 
     "order:read",
     "order:write",
     "stock:write",
+    "wms:read",
+    "wms:write",
     "user:invite",
     "user:remove"
   ],
-  seller_staff: ["tenant:read", "channel:read", "order:read", "order:write", "stock:write"],
-  seller_viewer: ["tenant:read", "channel:read", "order:read"],
+  seller_staff: ["tenant:read", "channel:read", "order:read", "order:write", "stock:write", "wms:read", "wms:write"],
+  seller_viewer: ["tenant:read", "channel:read", "order:read", "wms:read"],
   // Operators can read, create and terminate, but they can never act inside a tenant's commerce
   // data. Those are seller capabilities, and holding them would make operator actions unauditable.
   operator: ["tenant:read", "tenant:create", "tenant:terminate", "ops:read", "ops:impersonate"]

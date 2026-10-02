@@ -187,7 +187,11 @@ export const createPickTaskWorkflow = createWorkflow(createPickTaskWorkflowId, (
       pickTaskId: created.pickTaskId,
       orderId: resolved.orderId,
       packingBinId: resolved.packingBinId,
-      lines: resolved.lines.map((line) => ({
+      // `created.lineIds` is in the same order as `resolved.lines` (both come from one insert), so
+      // the id is paired by index. Without it a caller that wants to scan a line has to re-read the
+      // task first, which is an extra round trip for a value the create already knows.
+      lines: resolved.lines.map((line, index) => ({
+        id: created.lineIds[index] ?? "",
         sku: line.sku,
         quantity: line.quantity,
         binId: line.bin_id,

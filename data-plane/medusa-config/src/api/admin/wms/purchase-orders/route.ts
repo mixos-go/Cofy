@@ -9,6 +9,9 @@ interface PurchaseOrderService {
   listPurchaseOrders(
     filters: Record<string, unknown>
   ): Promise<{ id: string; warehouse_id: string; supplier_reference: string | null; status: string; received_at: Date | null }[]>;
+  listPurchaseOrderLines(
+    filters: Record<string, unknown>
+  ): Promise<{ id: string; purchase_order_id: string; sku: string; title: string; ordered_quantity: number; received_quantity: number }[]>;
 }
 
 interface WmsWarehouseService {
@@ -76,13 +79,33 @@ export const GET = async (req: AuthenticatedMedusaRequest, res: MedusaResponse):
   const warehouseId = req.query.warehouseId as string | undefined;
   const orders = await purchaseOrders.listPurchaseOrders(warehouseId ? { warehouse_id: warehouseId } : {});
 
+  // Lines come back with the orders in one query keyed by `purchase_order_id`, not one query per
+  // order. The inbound screen shows what is still outstanding on each PO, and that number only
+  // exists on the line.
+  const orderIds = orders.map((order) => order.id);
+  const lines = orderIds.length === 0 ? [] : await purchaseOrders.listPurchaseOrderLines({ purchase_order_id: orderIds });
+
+  const linesByOrder = new Map<string, typeof lines>();
+  for (const line of lines) {
+    const existing = linesByOrder.get(line.purchase_order_id) ?? [];
+    existing.push(line);
+    linesByOrder.set(line.purchase_order_id, existing);
+  }
+
   res.status(200).json({
     purchaseOrders: orders.map((order) => ({
       id: order.id,
       warehouseId: order.warehouse_id,
       supplierReference: order.supplier_reference,
       status: order.status,
-      receivedAt: order.received_at
+      receivedAt: order.received_at,
+      lines: (linesByOrder.get(order.id) ?? []).map((line) => ({
+        id: line.id,
+        sku: line.sku,
+        title: line.title,
+        orderedQuantity: line.ordered_quantity,
+        receivedQuantity: line.received_quantity
+      }))
     }))
   });
 };

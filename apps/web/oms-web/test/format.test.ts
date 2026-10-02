@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { channelLabel, formatExpiry, formatMoney, formatTimestamp } from "../src/format.ts";
+import {
+  binKindLabel,
+  formatDelta,
+  formatVariance,
+  movementKindLabel,
+  pickTaskStatusLabel,
+  purchaseOrderStatusLabel,
+  stocktakeStatusLabel
+} from "../src/format.ts";
 
 test("sen are converted to whole rupiah at the display boundary", () => {
   // Rp 20.000 is 2_000_000 sen. The separator is a period in id-ID, and the space after "Rp" is
@@ -38,4 +47,38 @@ test("an expiry is phrased as a deadline a seller can act on", () => {
   assert.equal(formatExpiry("2026-09-30T00:00:00.000Z", now), "Kedaluwarsa dalam 4 hari");
   assert.equal(formatExpiry("2026-09-25T00:00:00.000Z", now), "Sudah kedaluwarsa — sambungkan ulang");
   assert.equal(formatExpiry("not-a-date", now), "—");
+});
+
+test("warehouse codes are shown as the words a warehouse worker uses", () => {
+  assert.equal(binKindLabel("staging"), "Area terima");
+  assert.equal(binKindLabel("storage"), "Penyimpanan");
+  assert.equal(binKindLabel("packing"), "Area kemas");
+  assert.equal(movementKindLabel("receipt"), "Penerimaan");
+  assert.equal(movementKindLabel("put_away"), "Pindah rak");
+  assert.equal(movementKindLabel("pick"), "Pengambilan");
+  assert.equal(movementKindLabel("stocktake"), "Stok opname");
+
+  assert.equal(purchaseOrderStatusLabel("ordered"), "Dipesan");
+  assert.equal(purchaseOrderStatusLabel("partially_received"), "Diterima sebagian");
+  assert.equal(pickTaskStatusLabel("open"), "Terbuka");
+  assert.equal(stocktakeStatusLabel("applied"), "Diterapkan");
+
+  // An unknown code falls back to itself, for the same reason channelLabel does.
+  assert.equal(binKindLabel("mystery"), "mystery");
+  assert.equal(movementKindLabel("mystery"), "mystery");
+});
+
+test("a ledger delta keeps its sign, because the sign is the meaning", () => {
+  // A receipt and a correction must not render the same: the sign is what tells them apart.
+  assert.equal(formatDelta(10), "+10");
+  assert.equal(formatDelta(-3), "-3");
+  assert.equal(formatDelta(0), "0");
+});
+
+test("a variance is phrased as over, short, or matching — not as a bare number", () => {
+  assert.equal(formatVariance(0), "Sesuai");
+  assert.equal(formatVariance(2), "Lebih 2");
+  assert.equal(formatVariance(-3), "Kurang 3");
+  // An uncounted row has no variance yet, which is not the same as a variance of zero.
+  assert.equal(formatVariance(null), "—");
 });

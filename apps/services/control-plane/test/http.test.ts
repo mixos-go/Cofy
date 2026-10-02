@@ -29,6 +29,8 @@ import type { SellerReadTransport } from "../src/seller-orders.ts";
 import { HttpChannelConnectionClient } from "../src/channels.ts";
 import type { ChannelConnectionTransport } from "../src/channels.ts";
 import { InMemoryAuditLog } from "../src/audit.ts";
+import { HttpWmsClient } from "../src/wms.ts";
+import type { WmsTransport } from "../src/wms.ts";
 import { createLogger } from "../src/logging.ts";
 import { SYNC_ENTITIES } from "@platform/contracts";
 
@@ -48,6 +50,8 @@ interface Harness {
   setSellerTransport: (transport: SellerReadTransport) => void;
   /** Replace the channel-service transport so a connection is exercised without the integration plane. */
   setChannelTransport: (transport: ChannelConnectionTransport) => void;
+  /** Replace the tenant-engine transport so the warehouse surface is exercised without a live instance. */
+  setWmsTransport: (transport: WmsTransport) => void;
   close: () => Promise<void>;
 }
 
@@ -118,6 +122,18 @@ async function startHarness(): Promise<Harness> {
     logger
   });
 
+  // The warehouse surface's seam. Built once, as production builds it, so the request shape (path,
+  // Basic credential, body) is what the test exercises rather than a stub of our own code.
+  let wmsTransport: WmsTransport = () => {
+    throw new Error("wms transport not installed by the test");
+  };
+  const wms = new HttpWmsClient({
+    targets: medusaTargets,
+    keys: medusaKeys,
+    transport: (url, init) => wmsTransport(url, init),
+    logger
+  });
+
   const server = createControlPlaneServer({
     registry,
     provisioning,
@@ -129,6 +145,7 @@ async function startHarness(): Promise<Harness> {
     sellerOrders,
     channelConnections,
     auditLog: new InMemoryAuditLog(),
+    wms,
     logger
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -148,6 +165,9 @@ async function startHarness(): Promise<Harness> {
     },
     setChannelTransport: (transport) => {
       channelTransport = transport;
+    },
+    setWmsTransport: (transport) => {
+      wmsTransport = transport;
     },
     close: () =>
       new Promise<void>((resolve) => {
@@ -259,6 +279,7 @@ test("the API", async (t) => {
   });
 
   let sellerToken = "";
+  let sellerAccountId = "";
 
   await t.test("a seller account is created and can log in", async () => {
     const account = await harness.accounts.create({
@@ -270,6 +291,7 @@ test("the API", async (t) => {
       now: NOW
     });
     assert.equal(account.tenantId, tenantId);
+    sellerAccountId = account.id;
     sellerToken = await login(harness.baseUrl, "seller@example.com", GOOD_PASSWORD);
   });
 
@@ -836,6 +858,237 @@ test("the API", async (t) => {
     assert.equal(response.status, 502);
     const body = (await response.json()) as { error: { code: string } };
     assert.equal(body.error.code, "UPSTREAM_ERROR");
+  });
+
+  await t.test("the warehouse read is the session's tenant, over a Basic credential, and is projected", async () => {
+    const seen: { url: string; auth: string | undefined }[] = [];
+    harness.setWmsTransport(async (url, init) => {
+      seen.push({ url, auth: (init.headers as Record<string, string>)?.authorization });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            warehouses: [
+              { id: "wh_1", name: "Gudang Utama", stockLocationId: "loc_1", tenant_id: "leaked", secret: "nope" }
+            ]
+          })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { warehouses: Record<string, unknown>[] };
+
+    // The credential is the tenant's Medusa key over HTTP Basic, not a bearer and not the seller's
+    // token (ADR 0012), and the path is the tenant instance's own Admin route.
+    assert.equal(seen.length, 1);
+    assert.ok(seen[0]?.auth?.startsWith("Basic "), "the tenant's admin key must be sent over Basic");
+    assert.ok(seen[0]?.url.includes("/admin/wms/warehouses"));
+
+    // The projection strips what the seller may not see: a field the data plane adds (or leaks) does
+    // not reach the seller by default (ADR 0016).
+    assert.deepEqual(body.warehouses, [{ id: "wh_1", name: "Gudang Utama", stockLocationId: "loc_1" }]);
+  });
+
+  await t.test("a seller creates a warehouse and a bin, and the tenant is never in the request", async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    harness.setWmsTransport(async (url, init) => {
+      const body = init.body === undefined ? null : JSON.parse(String(init.body));
+      posts.push({ url, body });
+      if (url.includes("/warehouses")) {
+        return {
+          ok: true,
+          status: 201,
+          text: async () => JSON.stringify({ warehouse: { id: "wh_2", name: "Gudang 2", stockLocationId: null } })
+        };
+      }
+      return {
+        ok: true,
+        status: 201,
+        text: async () => JSON.stringify({ bin: { id: "bin_2", warehouseId: "wh_2", code: "A-01", kind: "storage" } })
+      };
+    });
+
+    const warehouse = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Gudang 2" })
+    });
+    assert.equal(warehouse.status, 200);
+    assert.deepEqual(posts[0]?.body, { name: "Gudang 2", stockLocationId: null });
+
+    const bin = await fetch(`${harness.baseUrl}/v1/seller/wms/bins`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ warehouseId: "wh_2", code: "A-01", kind: "storage" })
+    });
+    assert.equal(bin.status, 200);
+    // The tenant is the session's and is not forwarded in the body: the instance already is that
+    // tenant, so there is no tenant field a caller could tamper with.
+    assert.deepEqual(posts[1]?.body, { warehouseId: "wh_2", code: "A-01", kind: "storage" });
+  });
+
+  await t.test("receiving a purchase order forwards the lines and attributes the act to the seller", async () => {
+    let forwarded: Record<string, unknown> | null = null;
+    harness.setWmsTransport(async (url, init) => {
+      assert.ok(url.includes("/admin/wms/purchase-orders/po_1/receive"));
+      forwarded = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ receipt: { purchaseOrderId: "po_1", stagingBinId: "bin_stg", status: "received" } })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/wms/purchase-orders/po_1/receive`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ lines: [{ sku: "SKU-1", quantity: 10 }] })
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(forwarded, { lines: [{ sku: "SKU-1", quantity: 10 }], actor: sellerAccountId });
+
+    const body = (await response.json()) as { receipt: { status: string; stagingBinId: string } };
+    assert.equal(body.receipt.status, "received");
+    assert.equal(body.receipt.stagingBinId, "bin_stg");
+  });
+
+  await t.test("a wrong-barcode scan is a 422 carrying the engine's message, not a generic failure", async () => {
+    harness.setWmsTransport(async () => ({
+      ok: false,
+      status: 400,
+      text: async () =>
+        JSON.stringify({ message: "Barcode 999 does not match the expected barcode for SKU-1." })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/wms/pick-tasks/task_1/scans`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ sku: "SKU-1", barcode: "999", quantity: 1 })
+    });
+    // The picker has to know what was expected, so the engine's own message is surfaced rather than
+    // replaced by "the request failed".
+    assert.equal(response.status, 422);
+    const body = (await response.json()) as { error: { code: string; message: string } };
+    assert.equal(body.error.code, "VALIDATION_FAILED");
+    assert.match(body.error.message, /does not match the expected barcode/);
+  });
+
+  await t.test("a seller_viewer may see the warehouse but may not move stock in it", async () => {
+    const viewerToken = await login(harness.baseUrl, "viewer@example.com", GOOD_PASSWORD);
+    harness.setWmsTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ warehouses: [] })
+    }));
+
+    const read = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(read.status, 200);
+
+    // A receipt, a put-away, a pick and a stocktake are all `wms:write`; a viewer holds only read.
+    for (const [path, payload] of [
+      ["/v1/seller/wms/put-away", { warehouseId: "w", fromBinId: "a", toBinId: "b", sku: "S", quantity: 1 }],
+      ["/v1/seller/wms/purchase-orders", { warehouseId: "w", lines: [{ sku: "S", title: "T", orderedQuantity: 1 }] }],
+      ["/v1/seller/wms/pick-tasks", { warehouseId: "w", orderId: "o", packingBinId: "p", lines: [{ sku: "S", quantity: 1 }] }],
+      ["/v1/seller/wms/stocktakes", { warehouseId: "w", binId: "b", sku: "S" }]
+    ] as const) {
+      const response = await fetch(`${harness.baseUrl}${path}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${viewerToken}`, "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      assert.equal(response.status, 403, `${path} must be refused for a viewer`);
+    }
+  });
+
+  await t.test("an impersonated session may read the warehouse and may not move stock in it", async () => {
+    // This is the ADR 0019 read-only floor reaching the warehouse: support sees what the seller
+    // sees, and cannot act inside the tenant.
+    const impersonated = await fetch(`${harness.baseUrl}/v1/ops/impersonate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operatorToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ tenantId })
+    });
+    assert.equal(impersonated.status, 200);
+    const { token } = (await impersonated.json()) as { token: string };
+
+    harness.setWmsTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ bins: [] })
+    }));
+
+    const read = await fetch(`${harness.baseUrl}/v1/seller/wms/bins`, {
+      headers: { authorization: `Bearer ${token}` }
+    });
+    assert.equal(read.status, 200);
+
+    const write = await fetch(`${harness.baseUrl}/v1/seller/wms/stocktakes`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ warehouseId: "w", binId: "b", sku: "S" })
+    });
+    assert.equal(write.status, 403);
+  });
+
+  await t.test("the warehouse surface refuses an operator and a service token, and needs a bin for the ledger", async () => {
+    const operator = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    assert.equal(operator.status, 403);
+
+    const service = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(service.status, 401);
+
+    // The ledger is read per bin; an absent `binId` is a bad request, not a whole-ledger dump.
+    const noBin = await fetch(`${harness.baseUrl}/v1/seller/wms/stock-movements`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(noBin.status, 422);
+  });
+
+  await t.test("an unreachable engine is not an empty warehouse, and a tenant with no key is a hard 404", async () => {
+    harness.setWmsTransport(async () => {
+      throw new Error("connection refused");
+    });
+    const down = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(down.status, 502);
+    const body = (await down.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "UPSTREAM_ERROR");
+
+    await harness.medusaKeys.delete(tenantId);
+    harness.setWmsTransport(async () => ({ ok: true, status: 200, text: async () => "{}" }));
+    const noKey = await fetch(`${harness.baseUrl}/v1/seller/wms/warehouses`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(noKey.status, 404);
+    await harness.medusaKeys.put(tenantId, "sk_test_secret_value");
+  });
+
+  await t.test("a malformed warehouse body is 422 before anything crosses to the tenant", async () => {
+    let called = false;
+    harness.setWmsTransport(async () => {
+      called = true;
+      return { ok: true, status: 201, text: async () => JSON.stringify({ warehouse: {} }) };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/wms/bins`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ warehouseId: "w", code: "", kind: "somewhere" })
+    });
+    assert.equal(response.status, 422);
+    assert.equal(called, false, "a malformed body must not reach the tenant");
   });
 
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {

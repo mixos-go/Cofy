@@ -16,6 +16,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <nav>
           <Link href="/orders">Pesanan</Link>
           <Link href="/channels">Kanal</Link>
+          <Link href="/warehouse">Gudang</Link>
           <Link href="/sync-health">Kesehatan sinkronisasi</Link>
         </nav>
         <form action="/api/session/logout" method="post">

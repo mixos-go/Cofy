@@ -19,6 +19,8 @@ export const DATABASE_URL = process.env.TEST_DATABASE_URL;
 export const MEDUSA_CWD = new URL("../../../../../data-plane/medusa-config", import.meta.url).pathname;
 export const MEDUSA_COMMAND = `${MEDUSA_CWD}/node_modules/.bin/medusa`;
 export const SEED_SCRIPT = "src/scripts/seed-tenant-order.ts";
+/** The M6 warehouse fixture, for tests that need a tenant with a stocked warehouse. */
+export const WMS_SEED_SCRIPT = "src/scripts/seed-tenant-wms.ts";
 
 export function databaseUrlFor(base: string, databaseName: string): string {
   const url = new URL(base);

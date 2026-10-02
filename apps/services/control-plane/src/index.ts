@@ -21,4 +21,5 @@ export * from "./tenants.ts";
 export * from "./seller-orders.ts";
 export * from "./channels.ts";
 export * from "./audit.ts";
+export * from "./wms.ts";
 export * from "./http.ts";

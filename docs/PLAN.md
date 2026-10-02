@@ -29,7 +29,7 @@ This file is the **single source of truth for what we are building next**.
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
-| M6 | WMS core (inbound, pick, pack, stocktake) | Backend done; screens pending | M5 |
+| M6 | WMS core (inbound, pick, pack, stocktake) | Screens done; channel-sync SLO assertion open | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
@@ -727,12 +727,15 @@ transport *and* end to end against a booted Medusa HTTP server (`test/integratio
 
 **Goal.** Warehouse operations that Medusa does not provide.
 
-**Status.** In progress. The **backend is delivered and proven end to end**: the `wms` and
-`purchase-order` modules, the inbound and outbound workflows, the Admin API routes and the stock
-ledger all exist, and `test/integration/wms-stock-write-path.test.ts` boots a real Medusa, walks
-receipt → put-away → pick → stocktake over HTTP, and reads `inventory_level.stocked_quantity` out of
-the tenant schema to show the engine's number and the ledger's moved together. The **WMS screens in
-`apps/web/oms-web` are not built**, so the milestone is not done. Design: `docs/adr/0018`.
+**Status.** Screens delivered; one exit criterion still open. The **backend is delivered and proven
+end to end**: the `wms` and `purchase-order` modules, the inbound and outbound workflows, the Admin
+API routes and the stock ledger all exist, and `test/integration/wms-stock-write-path.test.ts` boots
+a real Medusa, walks receipt → put-away → pick → stocktake over HTTP, and reads
+`inventory_level.stocked_quantity` out of the tenant schema to show the engine's number and the
+ledger's moved together. The **WMS screens in `apps/web/oms-web` are now built** — layout, inbound,
+pick tasks, stocktakes, and the per-bin contents and ledger — over a new control-plane seller WMS
+surface (`/v1/seller/wms/*`, capability-gated by `wms:read`/`wms:write`). The remaining gap is the
+channel-sync SLO assertion below, not a screen. Design: `docs/adr/0018`.
 
 **Deliverables**
 
@@ -741,7 +744,11 @@ the tenant schema to show the engine's number and the ledger's moved together. T
   *(Delivered: `data-plane/modules/wms` and `data-plane/modules/purchase-order`, both registered in
   `medusa-config.ts`. Each owns its tables; the warehouse reaches the engine's stock location by
   `stock_location_id`, so no core table is altered.)*
-- WMS screens in `apps/web/oms-web`. *(Not built.)*
+- WMS screens in `apps/web/oms-web`. *(Delivered: `/warehouse` (warehouses and bins), `/warehouse/inbound`
+  (purchase orders, receiving, put-away), `/warehouse/pick-tasks` (create and scan), `/warehouse/stocktakes`
+  (open and apply), and `/warehouse/bins/[binId]` (contents and movement ledger). Writes are server
+  actions over the control plane's seller WMS routes; the tenant and the actor are the session's, never
+  the form's.)*
 - Inbound flow: purchase order → goods receipt → put-away → stock available. *(Delivered:
   `receivePurchaseOrderWorkflow` posts units into the staging bin and adjusts the Medusa level in one
   workflow; `putAwayWorkflow` relocates them bin to bin without touching the level.)*
@@ -749,7 +756,8 @@ the tenant schema to show the engine's number and the ledger's moved together. T
   through pack: `createPickTaskWorkflow` and `scanPickLineWorkflow` collect units into a packing bin
   and refuse a scan whose barcode does not match the variant. Handover is M7.)*
 - Stock adjustment and stocktake with variance reporting. *(Delivered: `openStocktakeWorkflow`
-  freezes the system quantity, `applyStocktakeWorkflow` records the variance as a signed movement.)*
+  freezes the system quantity, `applyStocktakeWorkflow` records the variance as a signed movement;
+  the stocktake screen shows the variance before it is applied and the bin ledger shows it afterwards.)*
 
 **Exit criteria**
 
@@ -765,6 +773,12 @@ the tenant schema to show the engine's number and the ledger's moved together. T
 - [x] All WMS data lives in custom modules; `pnpm boundaries` proves no core table was altered.
       *`pnpm boundaries` is clean, and the WMS migration creates only `wms_*` and `purchase_order*`
       tables in the tenant schema.*
+- [x] A seller can run the inbound, outbound and stocktake flows from the UI, and a viewer or an
+      impersonated session can look but not move stock. *Delivered as the `/warehouse` screens over
+      the control plane's `/v1/seller/wms/*` surface; `http.test.ts` pins that a `seller_viewer` and
+      an impersonated session read the warehouse and get a 403 on every write, and
+      `apps/web/oms-web/test/control-plane.test.ts` pins that each screen function addresses the
+      route the control plane actually serves.*
 - [ ] WMS operations reflect in channel stock within the sync SLO. *The stock half holds — the M6
       test proves the engine's inventory level moves on receipt and on a stocktake correction, which
       is the number the M4 push reads — but no test asserts the push that follows lands within the

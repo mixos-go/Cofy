@@ -368,6 +368,21 @@ Hard-won specifics from building `packages/sync-state` and `apps/services/worker
   (`packages/sync-state/testing`), or "the in-memory one mirrors the real one" is an assumption, and
   the difference surfaces as a production-only bug. The suite lives on a `./testing` subpath so
   `node:test` never loads in a running service.
+- **A UI client and the route it calls are two files that can disagree while both suites pass.**
+  `apps/web/oms-web/src/control-plane.ts` builds a URL string; the control plane's route table in
+  `http.ts` matches it. Nothing type-checks the pair, so a renamed path or a changed method keeps
+  the client's tests green (they stub `fetch` and assert a response the client parses) and the
+  server's tests green (they call the route the client no longer uses). The warehouse surface hit
+  exactly this: `createPickTask` was declared twice and one copy addressed the wrong path. Pin the
+  seam — assert the URL and method each client function issues against the route the server
+  registers (`apps/web/oms-web/test/control-plane.test.ts`), the way a contract test would, and treat
+  a page-level test that only renders the result as not covering it.
+- **A form that offers a choice the engine must reject is a bug in the form.** The WMS screens
+  originally rendered one create form listing every warehouse's bins, so a seller could pair a
+  warehouse with another site's packing bin and only find out from the engine's refusal. When two
+  fields are constrained to agree (warehouse and its bins, a PO and its staging bin), render the form
+  per parent and list only that parent's children. The engine still validates; the UI should not
+  make an invalid combination selectable in the first place.
 - **A job-id-deduping queue will silently drop a reschedule if the retry reuses the original id.**
   BullMQ dedupes on job id across *every* state, not just pending: re-enqueueing a reschedule under
   the id of the job that is currently being processed is a no-op, and the retry never runs. Derive a

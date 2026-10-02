@@ -219,3 +219,267 @@ export function disconnectChannel(
     method: "POST"
   });
 }
+
+// --- The warehouse surface (docs/PLAN.md M6, ADR 0018). The shapes mirror the control plane's
+// projection, which is what a seller may see — not the tenant instance's own response, which carries
+// fields the seller has no business with. ---
+
+export interface Warehouse {
+  readonly id: string;
+  readonly name: string;
+  readonly stockLocationId: string | null;
+}
+
+export type BinKind = "staging" | "storage" | "packing";
+
+export interface Bin {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly code: string;
+  readonly kind: BinKind;
+}
+
+export interface BinContents {
+  readonly binId: string;
+  readonly code: string;
+  readonly kind: BinKind;
+  readonly contents: readonly { readonly sku: string; readonly quantity: number }[];
+}
+
+export interface PurchaseOrderLine {
+  readonly id: string;
+  readonly sku: string;
+  readonly title: string;
+  readonly orderedQuantity: number;
+  readonly receivedQuantity: number;
+}
+
+export interface PurchaseOrder {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly supplierReference: string | null;
+  readonly status: string;
+  readonly receivedAt: string | null;
+  readonly lines: readonly PurchaseOrderLine[];
+}
+
+export interface PickTaskLine {
+  readonly id: string;
+  readonly sku: string;
+  readonly quantity: number;
+  readonly binId: string | null;
+  readonly pickedBinId: string | null;
+  readonly expectedBarcode: string | null;
+  readonly scannedBarcode: string | null;
+  readonly pickedQuantity: number;
+}
+
+export interface PickTask {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly orderId: string;
+  readonly packingBinId: string | null;
+  readonly status: string;
+  readonly completedAt: string | null;
+  readonly lines: readonly PickTaskLine[];
+}
+
+export interface Stocktake {
+  readonly id: string;
+  readonly warehouseId: string;
+  readonly binId: string;
+  readonly sku: string;
+  readonly systemQuantity: number;
+  readonly countedQuantity: number | null;
+  readonly variance: number | null;
+  readonly status: string;
+  readonly countedBy: string | null;
+  readonly appliedAt: string | null;
+}
+
+export interface StockMovement {
+  readonly id: string;
+  readonly binId: string;
+  readonly sku: string;
+  readonly kind: string;
+  readonly delta: number;
+  readonly quantityBefore: number;
+  readonly quantityAfter: number;
+  readonly reason: string | null;
+  readonly actor: string | null;
+  readonly createdAt: string;
+}
+
+export function listWarehouses(token: string): Promise<ApiResult<{ readonly warehouses: readonly Warehouse[] }>> {
+  return request(token, "/v1/seller/wms/warehouses");
+}
+
+export function listBins(
+  token: string,
+  warehouseId?: string
+): Promise<ApiResult<{ readonly bins: readonly Bin[] }>> {
+  const query = warehouseId === undefined ? "" : `?warehouseId=${encodeURIComponent(warehouseId)}`;
+  return request(token, `/v1/seller/wms/bins${query}`);
+}
+
+export function getBinContents(token: string, binId: string): Promise<ApiResult<BinContents>> {
+  return request(token, `/v1/seller/wms/bins/${encodeURIComponent(binId)}/contents`);
+}
+
+export function listStockMovements(
+  token: string,
+  binId: string,
+  sku?: string
+): Promise<ApiResult<{ readonly movements: readonly StockMovement[] }>> {
+  const query = new URLSearchParams({ binId });
+  if (sku !== undefined && sku !== "") query.set("sku", sku);
+  return request(token, `/v1/seller/wms/stock-movements?${query.toString()}`);
+}
+
+export function listPurchaseOrders(
+  token: string,
+  warehouseId?: string
+): Promise<ApiResult<{ readonly purchaseOrders: readonly PurchaseOrder[] }>> {
+  const query = warehouseId === undefined ? "" : `?warehouseId=${encodeURIComponent(warehouseId)}`;
+  return request(token, `/v1/seller/wms/purchase-orders${query}`);
+}
+
+export function listPickTasks(
+  token: string,
+  filter: { readonly warehouseId?: string; readonly status?: string } = {}
+): Promise<ApiResult<{ readonly pickTasks: readonly PickTask[] }>> {
+  const query = new URLSearchParams();
+  if (filter.warehouseId !== undefined && filter.warehouseId !== "") query.set("warehouseId", filter.warehouseId);
+  if (filter.status !== undefined && filter.status !== "") query.set("status", filter.status);
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  return request(token, `/v1/seller/wms/pick-tasks${suffix}`);
+}
+
+export function listStocktakes(
+  token: string,
+  filter: { readonly warehouseId?: string; readonly status?: string } = {}
+): Promise<ApiResult<{ readonly stocktakes: readonly Stocktake[] }>> {
+  const query = new URLSearchParams();
+  if (filter.warehouseId !== undefined && filter.warehouseId !== "") query.set("warehouseId", filter.warehouseId);
+  if (filter.status !== undefined && filter.status !== "") query.set("status", filter.status);
+  const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+  return request(token, `/v1/seller/wms/stocktakes${suffix}`);
+}
+
+export function createWarehouse(
+  token: string,
+  input: { readonly name: string; readonly stockLocationId?: string | null }
+): Promise<ApiResult<{ readonly warehouse: Warehouse }>> {
+  return request(token, "/v1/seller/wms/warehouses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function createBin(
+  token: string,
+  input: { readonly warehouseId: string; readonly code: string; readonly kind: BinKind }
+): Promise<ApiResult<{ readonly bin: Bin }>> {
+  return request(token, "/v1/seller/wms/bins", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function createPurchaseOrder(
+  token: string,
+  input: {
+    readonly warehouseId: string;
+    readonly supplierReference?: string | null;
+    readonly expectedAt?: string | null;
+    readonly lines: readonly { readonly sku: string; readonly title: string; readonly orderedQuantity: number }[];
+  }
+): Promise<ApiResult<{ readonly purchaseOrder: PurchaseOrder }>> {
+  return request(token, "/v1/seller/wms/purchase-orders", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function receivePurchaseOrder(
+  token: string,
+  purchaseOrderId: string,
+  lines: readonly { readonly sku: string; readonly quantity: number }[]
+): Promise<ApiResult<{ readonly receipt: { readonly purchaseOrderId: string; readonly stagingBinId: string; readonly status: string } }>> {
+  return request(token, `/v1/seller/wms/purchase-orders/${encodeURIComponent(purchaseOrderId)}/receive`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ lines })
+  });
+}
+
+export function putAway(
+  token: string,
+  input: {
+    readonly warehouseId: string;
+    readonly fromBinId: string;
+    readonly toBinId: string;
+    readonly sku: string;
+    readonly quantity: number;
+  }
+): Promise<ApiResult<{ readonly putAway: { readonly fromBinId: string; readonly toBinId: string; readonly sku: string; readonly quantity: number } }>> {
+  return request(token, "/v1/seller/wms/put-away", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function createPickTask(
+  token: string,
+  input: {
+    readonly warehouseId: string;
+    readonly orderId: string;
+    readonly packingBinId: string;
+    readonly lines: readonly { readonly sku: string; readonly quantity: number }[];
+  }
+): Promise<ApiResult<{ readonly pickTask: PickTask }>> {
+  return request(token, "/v1/seller/wms/pick-tasks", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function scanPickLine(
+  token: string,
+  pickTaskId: string,
+  input: { readonly sku: string; readonly barcode: string; readonly quantity: number }
+): Promise<ApiResult<{ readonly scan: { readonly pickTaskId: string; readonly sku: string; readonly picked: number; readonly status: string } }>> {
+  return request(token, `/v1/seller/wms/pick-tasks/${encodeURIComponent(pickTaskId)}/scans`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function openStocktake(
+  token: string,
+  input: { readonly warehouseId: string; readonly binId: string; readonly sku: string }
+): Promise<ApiResult<{ readonly stocktake: { readonly stocktakeId: string; readonly systemQuantity: number } }>> {
+  return request(token, "/v1/seller/wms/stocktakes", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+}
+
+export function applyStocktake(
+  token: string,
+  stocktakeId: string,
+  countedQuantity: number
+): Promise<ApiResult<{ readonly stocktake: Stocktake }>> {
+  return request(token, `/v1/seller/wms/stocktakes/${encodeURIComponent(stocktakeId)}/apply`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ countedQuantity })
+  });
+}

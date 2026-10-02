@@ -308,6 +308,7 @@ export const applyStocktakeWorkflow = createWorkflow(applyStocktakeWorkflowId, (
   return new WorkflowResponse(
     transform({ variance, movement, recorded, applied }, ({ variance, movement }) => ({
       stocktakeId: variance.stocktakeId,
+      warehouseId: variance.warehouseId,
       sku: variance.sku,
       binId: variance.binId,
       systemQuantity: variance.systemQuantity,

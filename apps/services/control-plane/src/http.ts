@@ -31,6 +31,7 @@ import type { TenantTerminationService } from "./termination.ts";
 import type { SellerOrderReader } from "./seller-orders.ts";
 import type { ChannelConnectionClient } from "./channels.ts";
 import type { AuditLog } from "./audit.ts";
+import type { WmsClient } from "./wms.ts";
 import { driftFor, driftSummaryFor, explainDrift } from "./drift.ts";
 
 /** A route either requires a session, a service token, or is explicitly public. No default. */
@@ -75,6 +76,89 @@ const loginBody = z.object({
 /** The operator console's impersonation request (ADR 0019). */
 const impersonateBody = z.object({
   tenantId: z.string().min(1).max(64)
+});
+
+/**
+ * The seller warehouse surface's bodies (docs/PLAN.md M6).
+ *
+ * These validate the *platform* edge, before anything is forwarded to a tenant instance. The
+ * instance's own middlewares validate again — this is not a substitute for that, and must not be
+ * treated as one — but rejecting a malformed quantity here keeps a bad request from crossing a
+ * credential-bearing hop only to be refused there.
+ */
+const createWarehouseBody = z.object({
+  name: z.string().min(1).max(200),
+  stockLocationId: z.string().min(1).max(200).nullable().optional()
+});
+
+const createBinBody = z.object({
+  warehouseId: z.string().min(1).max(200),
+  code: z.string().min(1).max(100),
+  kind: z.enum(["staging", "storage", "packing"])
+});
+
+const createPurchaseOrderBody = z.object({
+  warehouseId: z.string().min(1).max(200),
+  supplierReference: z.string().min(1).max(200).nullable().optional(),
+  expectedAt: z.string().min(1).max(64).nullable().optional(),
+  lines: z
+    .array(
+      z.object({
+        sku: z.string().min(1).max(200),
+        title: z.string().min(1).max(300),
+        orderedQuantity: z.number().int().positive()
+      })
+    )
+    .min(1)
+});
+
+const receivePurchaseOrderBody = z.object({
+  lines: z
+    .array(
+      z.object({
+        sku: z.string().min(1).max(200),
+        quantity: z.number().int().positive()
+      })
+    )
+    .min(1)
+});
+
+const putAwayBody = z.object({
+  warehouseId: z.string().min(1).max(200),
+  fromBinId: z.string().min(1).max(200),
+  toBinId: z.string().min(1).max(200),
+  sku: z.string().min(1).max(200),
+  quantity: z.number().int().positive()
+});
+
+const createPickTaskBody = z.object({
+  warehouseId: z.string().min(1).max(200),
+  orderId: z.string().min(1).max(200),
+  packingBinId: z.string().min(1).max(200),
+  lines: z
+    .array(
+      z.object({
+        sku: z.string().min(1).max(200),
+        quantity: z.number().int().positive()
+      })
+    )
+    .min(1)
+});
+
+const scanPickLineBody = z.object({
+  sku: z.string().min(1).max(200),
+  barcode: z.string().min(1).max(300),
+  quantity: z.number().int().positive()
+});
+
+const openStocktakeBody = z.object({
+  warehouseId: z.string().min(1).max(200),
+  binId: z.string().min(1).max(200),
+  sku: z.string().min(1).max(200)
+});
+
+const applyStocktakeBody = z.object({
+  countedQuantity: z.number().int().min(0)
 });
 
 /** Bodies and params for the worker-facing sync-state surface (ADR 0010). */
@@ -149,6 +233,11 @@ export interface ControlPlaneApiOptions {
    * because a log line is not a record a reviewer can query after the fact.
    */
   readonly auditLog: AuditLog;
+  /**
+   * The warehouse surface (docs/PLAN.md M6, ADR 0018). The WMS lives inside the tenant instance; the
+   * seller's session lives here, so this client joins the two the same way the order read does.
+   */
+  readonly wms: WmsClient;
   readonly logger: Logger;
 }
 
@@ -508,6 +597,275 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
         return { disconnected: true, channel };
       }
     },
+
+    // --- The seller warehouse surface (docs/PLAN.md M6, ADR 0018). Every route below takes its
+    // tenant from the session and proxies the tenant instance's own `/admin/wms/*` routes, so the
+    // ledger and the engine's inventory level stay the instance's business. Reads need `wms:read`,
+    // which `seller_viewer` holds; writes need `wms:write`, which it does not — so an impersonated
+    // support session can see the warehouse and cannot move a unit in it (ADR 0019). ---
+    {
+      method: "GET",
+      path: "/v1/seller/wms/warehouses",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId }) => ({
+        warehouses: await options.wms.listWarehouses(sellerTenant(tenantId, "read warehouses"))
+      })
+    },
+    {
+      method: "GET",
+      path: "/v1/seller/wms/bins",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, request }) => {
+        const warehouseId = optionalQuery(request, "warehouseId");
+        return { bins: await options.wms.listBins(sellerTenant(tenantId, "read bins"), warehouseId) };
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/seller/wms/bins/:binId/contents",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, params }) => {
+        const binId = requiredParam(params, "binId");
+        return options.wms.getBinContents(sellerTenant(tenantId, "read a bin"), binId);
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/seller/wms/purchase-orders",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, request }) => {
+        const warehouseId = optionalQuery(request, "warehouseId");
+        return {
+          purchaseOrders: await options.wms.listPurchaseOrders(sellerTenant(tenantId, "read purchase orders"), warehouseId)
+        };
+      }
+    },
+    {
+      method: "GET",
+      path: "/v1/seller/wms/pick-tasks",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, request }) => ({
+        pickTasks: await options.wms.listPickTasks(sellerTenant(tenantId, "read pick tasks"), {
+          warehouseId: optionalQuery(request, "warehouseId"),
+          status: optionalQuery(request, "status")
+        })
+      })
+    },
+    {
+      method: "GET",
+      path: "/v1/seller/wms/stocktakes",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, request }) => ({
+        stocktakes: await options.wms.listStocktakes(sellerTenant(tenantId, "read stocktakes"), {
+          warehouseId: optionalQuery(request, "warehouseId"),
+          status: optionalQuery(request, "status")
+        })
+      })
+    },
+    {
+      // The ledger for one bin. This is the read that makes a stocktake auditable from the UI: the
+      // `stocktake` movement carries the counted number and the two quantities either side of it.
+      method: "GET",
+      path: "/v1/seller/wms/stock-movements",
+      auth: { kind: "session", capability: "wms:read", scope: "self" },
+      handler: async ({ tenantId, request }) => {
+        const binId = requiredQuery(request, "binId");
+        return {
+          movements: await options.wms.listStockMovements(sellerTenant(tenantId, "read the ledger"), {
+            binId,
+            sku: optionalQuery(request, "sku")
+          })
+        };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/warehouses",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = createWarehouseBody.parse(body);
+        const tenant = sellerTenant(tenantId, "create a warehouse");
+        const warehouse = await options.wms.createWarehouse({
+          tenantId: tenant,
+          name: parsed.name,
+          stockLocationId: parsed.stockLocationId ?? null
+        });
+        options.logger.info("wms.warehouse_created", { tenantId: tenant, warehouseId: warehouse.id, correlationId });
+        return { warehouse };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/bins",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = createBinBody.parse(body);
+        const tenant = sellerTenant(tenantId, "create a bin");
+        const bin = await options.wms.createBin({
+          tenantId: tenant,
+          warehouseId: parsed.warehouseId,
+          code: parsed.code,
+          kind: parsed.kind
+        });
+        options.logger.info("wms.bin_created", {
+          tenantId: tenant,
+          warehouseId: bin.warehouseId,
+          binId: bin.id,
+          correlationId
+        });
+        return { bin };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/purchase-orders",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = createPurchaseOrderBody.parse(body);
+        const tenant = sellerTenant(tenantId, "create a purchase order");
+        const purchaseOrder = await options.wms.createPurchaseOrder({
+          tenantId: tenant,
+          warehouseId: parsed.warehouseId,
+          supplierReference: parsed.supplierReference ?? null,
+          expectedAt: parsed.expectedAt ?? null,
+          lines: parsed.lines
+        });
+        options.logger.info("wms.purchase_order_created", {
+          tenantId: tenant,
+          purchaseOrderId: purchaseOrder.id,
+          correlationId
+        });
+        return { purchaseOrder };
+      }
+    },
+    {
+      // Receiving is the M6 exit criterion's write: the instance posts the units into the staging
+      // bin and raises the Medusa level at the warehouse's location in one workflow. The control
+      // plane contributes the tenant and the actor, and nothing else.
+      method: "POST",
+      path: "/v1/seller/wms/purchase-orders/:purchaseOrderId/receive",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, params, body, session, correlationId }) => {
+        const parsed = receivePurchaseOrderBody.parse(body);
+        const purchaseOrderId = requiredParam(params, "purchaseOrderId");
+        const tenant = sellerTenant(tenantId, "receive a purchase order");
+        const receipt = await options.wms.receivePurchaseOrder({
+          tenantId: tenant,
+          purchaseOrderId,
+          lines: parsed.lines,
+          actor: wmsActor(session!)
+        });
+        options.logger.info("wms.purchase_order_received", { tenantId: tenant, purchaseOrderId, correlationId });
+        return { receipt };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/put-away",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, session, correlationId }) => {
+        const parsed = putAwayBody.parse(body);
+        const tenant = sellerTenant(tenantId, "put stock away");
+        const putAway = await options.wms.putAway({ ...parsed, tenantId: tenant, actor: wmsActor(session!) });
+        options.logger.info("wms.put_away", {
+          tenantId: tenant,
+          fromBinId: putAway.fromBinId,
+          toBinId: putAway.toBinId,
+          correlationId
+        });
+        return { putAway };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/pick-tasks",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = createPickTaskBody.parse(body);
+        const tenant = sellerTenant(tenantId, "create a pick task");
+        const pickTask = await options.wms.createPickTask({ ...parsed, tenantId: tenant });
+        options.logger.info("wms.pick_task_created", {
+          tenantId: tenant,
+          pickTaskId: pickTask.id,
+          orderId: pickTask.orderId,
+          correlationId
+        });
+        return { pickTask };
+      }
+    },
+    {
+      // A scan that does not match the line's barcode is refused by the instance before any unit
+      // moves, and the refusal's message names what was expected — so it is surfaced as a 422 rather
+      // than swallowed into a generic failure.
+      method: "POST",
+      path: "/v1/seller/wms/pick-tasks/:pickTaskId/scans",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, params, body, session, correlationId }) => {
+        const parsed = scanPickLineBody.parse(body);
+        const pickTaskId = requiredParam(params, "pickTaskId");
+        const tenant = sellerTenant(tenantId, "scan a pick line");
+        const scan = await options.wms.scanPickLine({
+          tenantId: tenant,
+          pickTaskId,
+          sku: parsed.sku,
+          barcode: parsed.barcode,
+          quantity: parsed.quantity,
+          actor: wmsActor(session!)
+        });
+        options.logger.info("wms.pick_line_scanned", {
+          tenantId: tenant,
+          pickTaskId,
+          sku: parsed.sku,
+          status: scan.status,
+          correlationId
+        });
+        return { scan };
+      }
+    },
+    {
+      method: "POST",
+      path: "/v1/seller/wms/stocktakes",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = openStocktakeBody.parse(body);
+        const tenant = sellerTenant(tenantId, "open a stocktake");
+        const stocktake = await options.wms.openStocktake({ ...parsed, tenantId: tenant });
+        options.logger.info("wms.stocktake_opened", {
+          tenantId: tenant,
+          stocktakeId: stocktake.stocktakeId,
+          systemQuantity: stocktake.systemQuantity,
+          correlationId
+        });
+        return { stocktake };
+      }
+    },
+    {
+      // Applying a count records the variance as a signed `stocktake` movement and applies the same
+      // delta to the engine's level. It is a delta, never an assignment, which is what makes the
+      // correction auditable and reversible (docs/adr/0018).
+      method: "POST",
+      path: "/v1/seller/wms/stocktakes/:stocktakeId/apply",
+      auth: { kind: "session", capability: "wms:write", scope: "self" },
+      handler: async ({ tenantId, params, body, session, correlationId }) => {
+        const parsed = applyStocktakeBody.parse(body);
+        const stocktakeId = requiredParam(params, "stocktakeId");
+        const tenant = sellerTenant(tenantId, "apply a stocktake");
+        const stocktake = await options.wms.applyStocktake({
+          tenantId: tenant,
+          stocktakeId,
+          countedQuantity: parsed.countedQuantity,
+          countedBy: wmsActor(session!)
+        });
+        options.logger.info("wms.stocktake_applied", {
+          tenantId: tenant,
+          stocktakeId,
+          variance: stocktake.variance,
+          correlationId
+        });
+        return { stocktake };
+      }
+    },
+
     // --- Operator console surface (docs/PLAN.md M5, ADR 0019). `ops:*` capabilities are held by
     // `operator` alone, so a seller credential cannot reach any route below. ---
     {
@@ -780,6 +1138,61 @@ function sellerChannelParam(params: Readonly<Record<string, string>>): ChannelCo
     throw new PlatformError("NOT_FOUND", "Unknown channel.", { details: { channel: raw } });
   }
   return channel;
+}
+
+/**
+ * The tenant of a seller warehouse route.
+ *
+ * The route's `scope: "self"` authorization has already refused an operator, which is the only role
+ * with no tenant — so reaching here with `tenantId === null` would mean the scope check was bypassed.
+ * It throws rather than defaulting, because a default would be some other tenant's warehouse.
+ */
+function sellerTenant(tenantId: TenantId | null, action: string): TenantId {
+  if (tenantId === null) {
+    throw new PlatformError("FORBIDDEN", `A seller must name a tenant to ${action}.`, {
+      details: { hint: "Operators do not hold seller capabilities." }
+    });
+  }
+  return tenantId;
+}
+
+/**
+ * The actor recorded on a warehouse movement.
+ *
+ * A movement row's `actor` answers "who moved this", so it names the person: an operator acting
+ * through an impersonated session is recorded as that operator, not as the tenant's own staff
+ * (ADR 0019). A seller acting for themselves is recorded by their account, which the session's
+ * `accountId` carries.
+ */
+function wmsActor(session: Session): string {
+  return session.impersonation?.actorEmail ?? session.accountId;
+}
+
+/** A required path parameter. A route matched with an empty segment is a bad request, not a lookup. */
+function requiredParam(params: Readonly<Record<string, string>>, name: string): string {
+  const value = params[name];
+  if (value === undefined || value === "") {
+    throw new PlatformError("VALIDATION_FAILED", `${name} is required.`, { details: { name } });
+  }
+  return value;
+}
+
+function queryValue(request: IncomingMessage, name: string): string | null {
+  const value = new URL(request.url ?? "/", "http://localhost").searchParams.get(name);
+  return value === null || value === "" ? null : value;
+}
+
+function optionalQuery(request: IncomingMessage, name: string): string | undefined {
+  return queryValue(request, name) ?? undefined;
+}
+
+/** A required query parameter. The ledger is read per bin, so an absent `binId` is a bad request. */
+function requiredQuery(request: IncomingMessage, name: string): string {
+  const value = queryValue(request, name);
+  if (value === null) {
+    throw new PlatformError("VALIDATION_FAILED", `${name} is required.`, { details: { name } });
+  }
+  return value;
 }
 
 function matchPath(pattern: string, path: string): Record<string, string> | null {

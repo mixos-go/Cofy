@@ -67,3 +67,77 @@ export function formatExpiry(expiresAt: string | null, now: Date = new Date()): 
   if (days === 1) return "Kedaluwarsa besok";
   return `Kedaluwarsa dalam ${days} hari`;
 }
+
+/**
+ * Warehouse vocabulary as a seller knows it (docs/PLAN.md M6).
+ *
+ * The API speaks bin kinds (`staging`, `storage`, `packing`) and movement kinds
+ * (`receipt`, `put_away`, `pick`, `stocktake`); a screen speaks Indonesian. One table each, so no
+ * page invents its own word and drifts — the same rule the channel labels follow.
+ */
+const BIN_KIND_LABELS: Readonly<Record<string, string>> = {
+  staging: "Area terima",
+  storage: "Penyimpanan",
+  packing: "Area kemas"
+};
+
+export function binKindLabel(kind: string): string {
+  return BIN_KIND_LABELS[kind] ?? kind;
+}
+
+const MOVEMENT_KIND_LABELS: Readonly<Record<string, string>> = {
+  receipt: "Penerimaan",
+  put_away: "Pindah rak",
+  pick: "Pengambilan",
+  stocktake: "Stok opname"
+};
+
+export function movementKindLabel(kind: string): string {
+  return MOVEMENT_KIND_LABELS[kind] ?? kind;
+}
+
+const PURCHASE_ORDER_STATUS_LABELS: Readonly<Record<string, string>> = {
+  ordered: "Dipesan",
+  partially_received: "Diterima sebagian",
+  received: "Diterima"
+};
+
+export function purchaseOrderStatusLabel(status: string): string {
+  return PURCHASE_ORDER_STATUS_LABELS[status] ?? status;
+}
+
+const PICK_TASK_STATUS_LABELS: Readonly<Record<string, string>> = {
+  open: "Terbuka",
+  completed: "Selesai"
+};
+
+export function pickTaskStatusLabel(status: string): string {
+  return PICK_TASK_STATUS_LABELS[status] ?? status;
+}
+
+const STOCKTAKE_STATUS_LABELS: Readonly<Record<string, string>> = {
+  open: "Terbuka",
+  applied: "Diterapkan"
+};
+
+export function stocktakeStatusLabel(status: string): string {
+  return STOCKTAKE_STATUS_LABELS[status] ?? status;
+}
+
+/**
+ * A signed ledger delta as a sentence a warehouse worker reads.
+ *
+ * A movement is a delta, never an assignment (ADR 0018), so the sign is the meaning: `+10` is stock
+ * that arrived, `-3` is stock that left or was found missing. Rendering the raw number without the
+ * sign would make a correction and a receipt look the same.
+ */
+export function formatDelta(delta: number): string {
+  return delta > 0 ? `+${delta}` : String(delta);
+}
+
+/** A stocktake variance: what the count found versus what the ledger expected. */
+export function formatVariance(variance: number | null): string {
+  if (variance === null) return "—";
+  if (variance === 0) return "Sesuai";
+  return variance > 0 ? `Lebih ${variance}` : `Kurang ${Math.abs(variance)}`;
+}
