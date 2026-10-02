@@ -60,6 +60,26 @@ export interface SyncHealth {
   readonly channels: readonly SyncChannel[];
 }
 
+/** One connected channel, as the control plane projects it. No credential ever appears here. */
+export interface ChannelConnection {
+  readonly tenantId: string;
+  readonly channel: string;
+  readonly expiresAt: string | null;
+  readonly context: Readonly<Record<string, string>>;
+}
+
+export interface ChannelList {
+  readonly tenantId: string;
+  readonly connections: readonly ChannelConnection[];
+  /** Every channel the platform serves, connected or not, so the screen never infers absence. */
+  readonly availableChannels: readonly string[];
+}
+
+export interface ChannelAuthorization {
+  readonly authorizeUrl: string;
+  readonly expiresAt: string;
+}
+
 export interface Session {
   readonly token: string;
   readonly role: string;
@@ -100,11 +120,12 @@ async function readJson(response: Response): Promise<unknown> {
 /**
  * A session-bearing request. `token` is always the cookie value, never something a page supplies.
  */
-async function request<T>(token: string, path: string): Promise<ApiResult<T>> {
+async function request<T>(token: string, path: string, init: RequestInit = {}): Promise<ApiResult<T>> {
   let response: Response;
   try {
     response = await fetch(`${controlPlaneBaseUrl()}${path}`, {
-      headers: { authorization: `Bearer ${token}` },
+      ...init,
+      headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
       // Seller reads are live operational data. Caching them would show a seller a stale status
       // during exactly the incident where the status matters.
       cache: "no-store"
@@ -172,4 +193,29 @@ export function getOrder(token: string, orderId: string): Promise<ApiResult<Orde
 
 export function getSyncHealth(token: string): Promise<ApiResult<SyncHealth>> {
   return request<SyncHealth>(token, "/v1/sync/health");
+}
+
+export function listChannels(token: string): Promise<ApiResult<ChannelList>> {
+  return request<ChannelList>(token, "/v1/seller/channels");
+}
+
+/**
+ * Begins a channel authorization and returns the marketplace URL to send the browser to.
+ *
+ * The state the control plane issues is single-use and short-lived, and it is the only thing tying
+ * the callback back to this tenant. The UI does not hold it beyond the redirect.
+ */
+export function connectChannel(token: string, channel: string): Promise<ApiResult<ChannelAuthorization>> {
+  return request<ChannelAuthorization>(token, `/v1/seller/channels/${encodeURIComponent(channel)}/connect`, {
+    method: "POST"
+  });
+}
+
+export function disconnectChannel(
+  token: string,
+  channel: string
+): Promise<ApiResult<{ readonly disconnected: boolean; readonly channel: string }>> {
+  return request(token, `/v1/seller/channels/${encodeURIComponent(channel)}/disconnect`, {
+    method: "POST"
+  });
 }

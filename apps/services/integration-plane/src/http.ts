@@ -13,7 +13,7 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { PlatformError, RateLimitedError, httpStatusFor } from "@platform/contracts";
+import { PlatformError, RateLimitedError, httpStatusFor, asChannelCode } from "@platform/contracts";
 import type { ChannelCode } from "@platform/contracts";
 import type { ChannelConnector } from "@platform/channel-sdk";
 import { z } from "zod";
@@ -243,6 +243,41 @@ export function createRoutes(
 
         // The seller sees a confirmation, not tokens.
         return { connected: true, channel };
+      }
+    },
+    {
+      // Every channel this tenant currently holds a credential for, as non-secret summaries.
+      //
+      // The control plane asks this to render the seller's channel list, and it must be able to ask
+      // without ever seeing a token: the summaries carry the marketplace identifiers and the expiry,
+      // which is what a "connected, expires in 3 days" row needs, and nothing that grants access.
+      method: "POST",
+      path: "/v1/channels/connections",
+      auth: { kind: "service" },
+      handler: async ({ body }) => {
+        const { tenantId } = authorizeBody.parse(body);
+        return { connections: await options.credentials.summariesForTenant(tenantId) };
+      }
+    },
+    {
+      // Revoke one channel's credential. Idempotent on purpose: disconnecting an already-disconnected
+      // channel is a no-op, not an error, because the seller's intent ("this channel should not be
+      // connected") is already satisfied and a 404 would only teach them to retry.
+      method: "POST",
+      path: "/v1/channels/:channel/disconnect",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const { tenantId } = authorizeBody.parse(body);
+        const raw = params.channel;
+        const channel = raw === undefined ? null : asChannelCode(raw);
+        if (channel === null) {
+          throw new PlatformError("NOT_FOUND", "Unknown channel.", { details: { channel: raw } });
+        }
+        // A channel we do not serve still has to be clearable, so the registry is not consulted: a
+        // connector removed from configuration must not strand a credential it once stored.
+        await options.credentials.clear({ tenantId, channel });
+        options.logger.info("channel.disconnected", { tenantId, channel });
+        return { disconnected: true, channel };
       }
     },
     {

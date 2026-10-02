@@ -32,3 +32,38 @@ export function formatTimestamp(value: string): string {
   if (Number.isNaN(parsed)) return "—";
   return new Date(parsed).toISOString().replace("T", " ").slice(0, 16);
 }
+
+/**
+ * Marketplace names as a seller knows them.
+ *
+ * The API speaks channel codes (`tiktok_tokopedia`); a screen speaks the marketplace's own name.
+ * Kept in one table so no page invents its own label and drifts from the others.
+ */
+const CHANNEL_LABELS: Readonly<Record<string, string>> = {
+  tiktok_tokopedia: "TikTok Shop / Tokopedia",
+  shopee: "Shopee",
+  lazada: "Lazada"
+};
+
+export function channelLabel(channel: string): string {
+  return CHANNEL_LABELS[channel] ?? channel;
+}
+
+/**
+ * A token expiry as a seller-facing sentence.
+ *
+ * A marketplace credential expiring is an operational fact the seller has to act on, so it is
+ * phrased as a deadline rather than a timestamp. A null expiry means the marketplace does not
+ * expire the credential, which is different from "expired" and must not read as such.
+ */
+export function formatExpiry(expiresAt: string | null, now: Date = new Date()): string {
+  if (expiresAt === null) return "Tidak kedaluwarsa";
+  const parsed = Date.parse(expiresAt);
+  if (Number.isNaN(parsed)) return "—";
+
+  const days = Math.floor((parsed - now.getTime()) / (24 * 60 * 60 * 1000));
+  if (days < 0) return "Sudah kedaluwarsa — sambungkan ulang";
+  if (days === 0) return "Kedaluwarsa hari ini";
+  if (days === 1) return "Kedaluwarsa besok";
+  return `Kedaluwarsa dalam ${days} hari`;
+}

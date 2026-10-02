@@ -41,6 +41,8 @@ import {
   RecordingMigrationRunner,
   SellerOrderReader,
   SessionManager,
+  HttpChannelConnectionClient,
+  InMemoryAuditLog,
   TenantRegistry,
   TenantTerminationService,
   createControlPlaneServer,
@@ -306,6 +308,17 @@ test(
       logger: silentLogger
     });
 
+    // A channel client that is never reached in this test: the isolation claim is about the seller
+    // *order* read, and a channel route that never runs is the honest way to keep it out of the way.
+    const channelConnections = new HttpChannelConnectionClient({
+      baseUrl: "https://integration.example.test",
+      serviceToken: "unused",
+      transport: () => {
+        throw new Error("the channel service is not exercised by the isolation test");
+      },
+      logger: silentLogger
+    });
+
     controlPlane.server = createControlPlaneServer({
       registry,
       provisioning,
@@ -315,6 +328,8 @@ test(
       medusaTargets: targets,
       serviceTokens: [],
       sellerOrders,
+      channelConnections,
+      auditLog: new InMemoryAuditLog(),
       logger
     });
     await new Promise<void>((resolve) => controlPlane.server!.listen(0, resolve));

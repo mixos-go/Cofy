@@ -20,7 +20,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, CHANNEL_CODES, asChannelCode } from "@platform/contracts";
-import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
+import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, Session, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
 import type { SessionManager } from "./identity.ts";
@@ -29,6 +29,8 @@ import type { TenantRegistry } from "./tenants.ts";
 import type { ProvisioningOrchestrator } from "./provisioning.ts";
 import type { TenantTerminationService } from "./termination.ts";
 import type { SellerOrderReader } from "./seller-orders.ts";
+import type { ChannelConnectionClient } from "./channels.ts";
+import type { AuditLog } from "./audit.ts";
 import { driftFor, driftSummaryFor, explainDrift } from "./drift.ts";
 
 /** A route either requires a session, a service token, or is explicitly public. No default. */
@@ -42,6 +44,11 @@ export interface RouteContext {
   readonly params: Readonly<Record<string, string>>;
   readonly body: unknown;
   readonly tenantId: TenantId | null;
+  /**
+   * The resolved session, or null for a public or service route. Routes that need to name the person
+   * acting — impersonation does (ADR 0019) — read it from here rather than re-resolving the token.
+   */
+  readonly session: Session | null;
   readonly correlationId: string;
 }
 
@@ -63,6 +70,11 @@ const createTenantBody = z.object({
 const loginBody = z.object({
   email: z.string().email(),
   password: z.string().min(1)
+});
+
+/** The operator console's impersonation request (ADR 0019). */
+const impersonateBody = z.object({
+  tenantId: z.string().min(1).max(64)
 });
 
 /** Bodies and params for the worker-facing sync-state surface (ADR 0010). */
@@ -126,6 +138,17 @@ export interface ControlPlaneApiOptions {
   readonly serviceTokens: readonly string[];
   /** Seller-facing commerce reads (ADR 0016). Reads the tenant's engine; stores nothing. */
   readonly sellerOrders: SellerOrderReader;
+  /**
+   * Channel connections (docs/PLAN.md M5). The control plane holds the seller session; the
+   * integration plane holds the credential. This is the client that joins the two over the
+   * service-token surface (ADR 0008).
+   */
+  readonly channelConnections: ChannelConnectionClient;
+  /**
+   * The impersonation audit trail (ADR 0019). An operator acting inside a tenant is recorded here,
+   * because a log line is not a record a reviewer can query after the fact.
+   */
+  readonly auditLog: AuditLog;
   readonly logger: Logger;
 }
 
@@ -423,6 +446,137 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
       }
     },
     {
+      // The channels a seller has connected (docs/PLAN.md M5). The tenant comes from the session,
+      // never the path, exactly as the order reads do — there is no id for a seller to tamper with.
+      method: "GET",
+      path: "/v1/seller/channels",
+      auth: { kind: "session", capability: "channel:read", scope: "self" },
+      handler: async ({ tenantId }) => {
+        if (tenantId === null) {
+          throw new PlatformError("FORBIDDEN", "Seller channels are read for one tenant, and an operator has none.", {
+            details: { hint: "Operator reads name their tenant explicitly." }
+          });
+        }
+        const connections = await options.channelConnections.list(tenantId);
+        // Every channel we serve is present, connected or not, so the screen can render a
+        // "hubungkan" button without inferring absence from a missing row.
+        return {
+          tenantId,
+          connections,
+          availableChannels: CHANNEL_CODES
+        };
+      }
+    },
+    {
+      // Begin a channel authorization. This is the "connect shop" click (ADR 0003): the platform
+      // owns the app, the seller only authorizes.
+      //
+      // The response carries the marketplace URL to send the browser to and the OAuth state it was
+      // issued for. The state is single-use and short-lived, and it is the only thing tying the
+      // callback back to this tenant — so it is the seller's to hold for the length of the flow and
+      // nothing more.
+      method: "POST",
+      path: "/v1/seller/channels/:channel/connect",
+      auth: { kind: "session", capability: "channel:connect", scope: "self" },
+      handler: async ({ tenantId, params, correlationId }) => {
+        if (tenantId === null) {
+          throw new PlatformError("FORBIDDEN", "A seller connects a channel for its own tenant.", {
+            details: { hint: "Operators do not hold seller capabilities." }
+          });
+        }
+        const channel = sellerChannelParam(params);
+        const authorization = await options.channelConnections.beginAuthorization({ tenantId, channel });
+        options.logger.info("channel.connect_started", { tenantId, channel, correlationId });
+        return authorization;
+      }
+    },
+    {
+      // Revoke one channel's credential. `channel:disconnect` is a capability `seller_viewer` and
+      // `seller_staff` do not hold, so a read-only seat cannot disconnect a shop.
+      method: "POST",
+      path: "/v1/seller/channels/:channel/disconnect",
+      auth: { kind: "session", capability: "channel:disconnect", scope: "self" },
+      handler: async ({ tenantId, params, correlationId }) => {
+        if (tenantId === null) {
+          throw new PlatformError("FORBIDDEN", "A seller disconnects a channel for its own tenant.", {
+            details: { hint: "Operators do not hold seller capabilities." }
+          });
+        }
+        const channel = sellerChannelParam(params);
+        await options.channelConnections.disconnect({ tenantId, channel });
+        options.logger.info("channel.disconnect_requested", { tenantId, channel, correlationId });
+        return { disconnected: true, channel };
+      }
+    },
+    // --- Operator console surface (docs/PLAN.md M5, ADR 0019). `ops:*` capabilities are held by
+    // `operator` alone, so a seller credential cannot reach any route below. ---
+    {
+      // The audited impersonation: an operator opens a short, read-only session for one tenant.
+      //
+      // Three things happen in this order, and the order matters: the session is minted first, then
+      // the audit record is written with the expiry the session actually got, then both are
+      // returned. If the audit write failed the request fails, because an impersonation that
+      // happened but was not recorded is the one outcome that must not be possible.
+      method: "POST",
+      path: "/v1/ops/impersonate",
+      auth: { kind: "session", capability: "ops:impersonate", scope: "tenant" },
+      handler: async ({ session, body, correlationId }) => {
+        const parsed = impersonateBody.parse(body);
+        const tenantId = parsed.tenantId as TenantId;
+
+        // The tenant must exist before a session is minted for it: a session pointing at a tenant
+        // that was never provisioned would only fail later, with a message about a missing engine
+        // rather than about a bad target.
+        const tenant = await options.registry.getDetail(tenantId);
+
+        const impersonated = await options.sessions.impersonate({ actor: session!, tenantId });
+
+        const record = await options.auditLog.recordImpersonation({
+          actorAccountId: impersonated.impersonation!.actorAccountId,
+          actorEmail: impersonated.impersonation!.actorEmail,
+          tenantId,
+          startedAt: impersonated.issuedAt,
+          expiresAt: impersonated.expiresAt
+        });
+
+        // The log line is a second copy for whoever is watching logs now; the record above is the
+        // one a reviewer queries later. Both name the actor and the tenant.
+        options.logger.info("ops.impersonation_started", {
+          correlationId,
+          actorAccountId: record.actorAccountId,
+          actorEmail: record.actorEmail,
+          tenantId,
+          expiresAt: record.expiresAt
+        });
+
+        return {
+          token: impersonated.token,
+          role: impersonated.role,
+          tenantId,
+          expiresAt: impersonated.expiresAt,
+          tenant: { id: tenant.tenant.id, displayName: tenant.tenant.displayName },
+          actor: { accountId: record.actorAccountId, email: record.actorEmail }
+        };
+      }
+    },
+    {
+      // The impersonation history (ADR 0019). A reviewer asks "who looked at this tenant" and gets
+      // the records; `tenantId` narrows it, and an operator may read across tenants because the
+      // whole point of the trail is oversight.
+      method: "GET",
+      path: "/v1/ops/impersonations",
+      auth: { kind: "session", capability: "ops:read", scope: "tenant" },
+      handler: async ({ request }) => {
+        const query = new URL(request.url ?? "/", "http://localhost").searchParams;
+        const tenantId = query.get("tenantId");
+        return {
+          impersonations: await options.auditLog.listImpersonations(
+            tenantId === null ? undefined : { tenantId }
+          )
+        };
+      }
+    },
+    {
       // The drift dashboard read (docs/PLAN.md M4). Same classifier and threshold as the worker's
       // repair pass, so the number the dashboard shows is the number reconciliation acts on.
       method: "GET",
@@ -612,6 +766,22 @@ function nonNegativeInt(value: string, name: string): number {
   return parsed;
 }
 
+/**
+ * The channel segment of a seller channel route, validated against the channels we serve.
+ *
+ * A path segment is caller input like any other, so it is narrowed rather than cast: an unknown
+ * channel is a 404 here instead of a string that travels to the integration plane and fails there
+ * with a less useful message.
+ */
+function sellerChannelParam(params: Readonly<Record<string, string>>): ChannelCode {
+  const raw = params.channel;
+  const channel = raw === undefined ? null : asChannelCode(raw);
+  if (channel === null) {
+    throw new PlatformError("NOT_FOUND", "Unknown channel.", { details: { channel: raw } });
+  }
+  return channel;
+}
+
 function matchPath(pattern: string, path: string): Record<string, string> | null {
   const patternParts = pattern.split("/").filter(Boolean);
   const pathParts = path.split("/").filter(Boolean);
@@ -733,6 +903,7 @@ async function handle(
         params,
         body,
         tenantId: targetTenantId,
+        session,
         correlationId
       });
 

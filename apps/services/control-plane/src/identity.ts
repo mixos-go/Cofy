@@ -13,7 +13,7 @@
 import { randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { PlatformError } from "@platform/contracts";
 import type { Account, Capability, Role, Session, TenantId, UserId } from "@platform/contracts";
-import { roleHasCapability } from "@platform/contracts";
+import { DEFAULT_IMPERSONATION_TTL_SECONDS, roleHasCapability } from "@platform/contracts";
 
 const SCRYPT_KEY_LENGTH = 64;
 const SCRYPT_COST = 16_384;
@@ -200,16 +200,19 @@ export class InMemoryAccountStore implements AccountStore {
 export class SessionManager {
   readonly #accounts: AccountStore;
   readonly #ttlSeconds: number;
+  readonly #impersonationTtlSeconds: number;
   readonly #now: () => string;
   readonly #sessions = new Map<string, Session>();
 
   constructor(options: {
     readonly accounts: AccountStore;
     readonly ttlSeconds?: number;
+    readonly impersonationTtlSeconds?: number;
     readonly now?: () => string;
   }) {
     this.#accounts = options.accounts;
     this.#ttlSeconds = options.ttlSeconds ?? DEFAULT_SESSION_TTL_SECONDS;
+    this.#impersonationTtlSeconds = options.impersonationTtlSeconds ?? DEFAULT_IMPERSONATION_TTL_SECONDS;
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -237,7 +240,67 @@ export class SessionManager {
       tenantId: account.tenantId,
       role: account.role,
       issuedAt,
-      expiresAt: new Date(Date.parse(issuedAt) + this.#ttlSeconds * 1000).toISOString()
+      expiresAt: new Date(Date.parse(issuedAt) + this.#ttlSeconds * 1000).toISOString(),
+      impersonation: null
+    };
+
+    this.#sessions.set(session.token, session);
+    return session;
+  }
+
+  /**
+   * Mint a time-boxed session for an operator to act as a tenant (ADR 0019).
+   *
+   * Three properties make this safe enough to exist:
+   *
+   *   1. **Least privilege.** The session carries `seller_viewer`, not the impersonated tenant's
+   *      strongest role. Support reads; support does not cancel orders or move stock. A support
+   *      action that *writes* would be a change with no seller behind it, and there is no screen
+   *      that should offer it.
+   *   2. **Time-boxed.** The session expires on `impersonationTtlSeconds`, which is much shorter
+   *      than a login. Nothing has to revoke it; it runs out.
+   *   3. **Attributable.** The session records the actor, so the audit trail names a person rather
+   *      than the tenant. The caller is responsible for writing that audit record; this method
+   *      makes the facts available, it does not hide them.
+   *
+   * The operator's own account must be an operator and enabled. An operator impersonating an
+   * operator is refused: the point is to see a tenant, and an operator has none.
+   */
+  async impersonate(input: {
+    readonly actor: Session;
+    readonly tenantId: TenantId;
+  }): Promise<Session> {
+    if (input.actor.role !== "operator") {
+      throw new PlatformError("FORBIDDEN", "Only an operator may impersonate a tenant.", {
+        details: { actorAccountId: input.actor.accountId }
+      });
+    }
+    if (input.actor.impersonation !== null) {
+      // An impersonated session cannot impersonate again, or the audit trail would point at a
+      // session instead of a person.
+      throw new PlatformError("FORBIDDEN", "An impersonated session may not impersonate.", {
+        details: { actorAccountId: input.actor.accountId }
+      });
+    }
+
+    const actor = await this.#accounts.getById(input.actor.accountId);
+    if (actor === null || actor.disabledAt !== null) {
+      throw new PlatformError("FORBIDDEN", "The impersonating operator is not active.", {
+        details: { actorAccountId: input.actor.accountId }
+      });
+    }
+
+    const issuedAt = this.#now();
+    const session: Session = {
+      token: randomBytes(32).toString("base64url"),
+      // The session acts for the tenant, but it is not the tenant's account: `accountId` stays the
+      // actor's, because that is who a reviewer must be able to trace an action to.
+      accountId: actor.id,
+      tenantId: input.tenantId,
+      role: "seller_viewer",
+      issuedAt,
+      expiresAt: new Date(Date.parse(issuedAt) + this.#impersonationTtlSeconds * 1000).toISOString(),
+      impersonation: { actorAccountId: actor.id, actorEmail: actor.email }
     };
 
     this.#sessions.set(session.token, session);

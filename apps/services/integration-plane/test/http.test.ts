@@ -714,3 +714,112 @@ test("a rate-limit response from the channel pauses every tenant on that channel
   }
 });
 
+test("connections lists a tenant's channels as summaries and never a token", async () => {
+  const h = await startHarness();
+  try {
+    await h.credentials.put({
+      tenantId: "tnt-a",
+      channel: "tiktok_tokopedia",
+      accessToken: "act.secret-value",
+      refreshToken: "rft.secret-value",
+      expiresAt: "2026-10-01T00:00:00.000Z",
+      context: { shopCipher: "cipher-a" }
+    });
+    // A second tenant's credential must not appear in this tenant's list.
+    await h.credentials.put({
+      tenantId: "tnt-b",
+      channel: "tiktok_tokopedia",
+      accessToken: "act.other",
+      refreshToken: null,
+      expiresAt: null,
+      context: {}
+    });
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/connections`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a" })
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      connections: { tenantId: string; channel: string; expiresAt: string | null; context: Record<string, string> }[];
+    };
+
+    assert.equal(body.connections.length, 1);
+    assert.equal(body.connections[0]?.tenantId, "tnt-a");
+    assert.equal(body.connections[0]?.channel, "tiktok_tokopedia");
+    assert.equal(body.connections[0]?.expiresAt, "2026-10-01T00:00:00.000Z");
+    assert.deepEqual(body.connections[0]?.context, { shopCipher: "cipher-a" });
+    // The whole point of the summary: a token must not be reachable through it.
+    assert.ok(!JSON.stringify(body).includes("act.secret-value"));
+    assert.ok(!JSON.stringify(body).includes("rft.secret-value"));
+  } finally {
+    await h.close();
+  }
+});
+
+test("connections requires a service token", async () => {
+  const h = await startHarness();
+  try {
+    const response = await fetch(`${h.baseUrl}/v1/channels/connections`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: "tnt-a" })
+    });
+    assert.equal(response.status, 401);
+  } finally {
+    await h.close();
+  }
+});
+
+test("disconnect revokes a channel's credential", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/disconnect`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a" })
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { disconnected: boolean; channel: string };
+    assert.equal(body.disconnected, true);
+    assert.equal(body.channel, "tiktok_tokopedia");
+
+    // The credential is gone, so it cannot be handed to a connector any more.
+    const stored = await h.credentials.get({ tenantId: "tnt-a", channel: "tiktok_tokopedia" });
+    assert.equal(stored, null);
+  } finally {
+    await h.close();
+  }
+});
+
+test("disconnecting an already-disconnected channel is a no-op, not an error", async () => {
+  const h = await startHarness();
+  try {
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/disconnect`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-none" })
+    });
+    // Idempotent: the seller's intent is already satisfied. A 404 would only teach them to retry.
+    assert.equal(response.status, 200);
+  } finally {
+    await h.close();
+  }
+});
+
+test("disconnect refuses an unknown channel rather than clearing an arbitrary key", async () => {
+  const h = await startHarness();
+  try {
+    const response = await fetch(`${h.baseUrl}/v1/channels/not-a-channel/disconnect`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a" })
+    });
+    assert.equal(response.status, 404);
+  } finally {
+    await h.close();
+  }
+});

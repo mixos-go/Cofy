@@ -19,4 +19,6 @@ export * from "./identity.ts";
 export * from "./termination.ts";
 export * from "./tenants.ts";
 export * from "./seller-orders.ts";
+export * from "./channels.ts";
+export * from "./audit.ts";
 export * from "./http.ts";

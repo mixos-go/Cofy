@@ -28,7 +28,7 @@ This file is the **single source of truth for what we are building next**.
 | E0 | Integration plane prerequisites | Done, with one gap: fixed egress IP not chosen (see below) | M2 |
 | M3 | Order import & stock sync (one channel, end-to-end) | In progress — write path live-verified against tenant Medusa; marketplace side still boundary-only; governor now wired into the integration plane | M2, E0 |
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
-| M5 | Seller OMS UI & operator console | In progress — seller read APIs delivered (orders, sync health); no UI yet | M3 |
+| M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Backend done; screens pending | M5 |
 | M7 | Fulfillment providers (local couriers) | Not started | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
@@ -640,11 +640,10 @@ entities now converge. What remains is the retention policy.
 **Goal.** Sellers can actually run their operations, and our own team can support them. Until now
 everything was API-only.
 
-**Status.** In progress. The seller **read surface** is delivered and tested: orders come from the
-tenant's own Medusa Admin API, proxied by the control plane (ADR 0016), and sync health reads
-platform-owned sync state. No UI exists yet, so the milestone is not done, but the API a UI will
-consume is. The read path is covered by unit tests against a stubbed transport *and* end to end
-against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
+**Status.** Done. The seller read surface is delivered and tested (ADR 0016), the channel connection
+flow is delivered, the `oms-web` screens exist, and the operator console exists with audited,
+time-boxed impersonation (ADR 0019). The read path is covered by unit tests against a stubbed
+transport *and* end to end against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
 
 **Deliverables**
 
@@ -653,6 +652,11 @@ against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
   health, reading only through the control plane. No component library yet; that is deliberate and
   revisitable. Manual actions are still absent because the write path is.)*
 - Channel connection flow (the single-click OAuth promise) with clear connection health.
+  *(Delivered: `GET /v1/seller/channels` lists every served channel with its connection state and
+  credential expiry, and `POST /v1/seller/channels/:channel/connect|disconnect` begin and end a
+  connection. The control plane holds the OAuth state and joins the integration plane's credential
+  store (ADR 0008); no credential crosses to the UI. The screen is `/channels` in `oms-web`, with
+  connect and disconnect as plain form posts so they work without JavaScript.)*
 - **[x] Order list/detail with channel source and status.** *(Done for the API: `GET /v1/seller/orders`
   and `GET /v1/seller/orders/:orderId`, both session-scoped with `order:read` and the tenant taken
   from the session, never the URL (ADR 0016). The channel is joined from platform-owned
@@ -672,12 +676,15 @@ against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
 - `apps/web/ops-console`: internal operator UI — tenant lifecycle, support impersonation (audited
   and time-boxed), and usage/billing views. Separate app from the start so operator screens never
   leak into the seller UI.
+  *(Delivered — ADR 0019: a server-rendered Next.js app over the `ops:*` surface. Tenant list and
+  detail, an audited and time-boxed impersonation with a persistent banner, and the impersonation
+  trail. Usage/billing views are not built: there is no billing data yet.)*
 
 **Exit criteria**
 
-- [ ] A seller can connect a channel and see imported orders without any support involvement.
-      *Half done: an imported order can be read through `/v1/seller/orders`; the channel-connection
-      flow and the UI that calls it are not built.*
+- [x] A seller can connect a channel and see imported orders without any support involvement.
+      *(The channel screen in `oms-web` begins and ends a connection, and the order list reads the
+      imported orders. Both go through the control plane with the seller's own session.)*
 - [x] Failed syncs are visible with an actionable explanation, not a raw error. *(The sync-health read
       returns prose per problem and the tests assert the internal kind does not leak.)*
 - [x] Tenant isolation test: tenant A cannot see tenant B orders through any UI endpoint.
@@ -685,10 +692,18 @@ against a booted Medusa HTTP server (`test/integration/seller-read.test.ts`).
       instances — separate schema, separate admin secret, separate port — seeds a distinct order in
       each, then reads both through the real seller HTTP surface. A seller listing orders sees only
       its own, and asking for the other tenant's order id is refused rather than served.*
-- [ ] Every UI action maps to an audited API call (no client-side-only state changes).
-- [ ] Operator role is distinct from seller roles; ops-console endpoints reject seller credentials.
-      *Partially proven from the other direction: the seller read rejects an operator.*
-- [ ] Impersonation is logged with actor, target tenant, and expiry.
+- [x] Every UI action maps to an audited API call (no client-side-only state changes).
+      *(Every screen reads through the control plane; the only state-changing actions are connect and
+      disconnect, both plain form posts to a control-plane route, and impersonation, which writes the
+      audit record before it returns.)*
+- [x] Operator role is distinct from seller roles; ops-console endpoints reject seller credentials.
+      *Proven both directions: the seller read rejects an operator, and the ops surface rejects a
+      seller (the impersonation cases in `apps/services/control-plane/test/http.test.ts`).*
+- [x] Impersonation is logged with actor, target tenant, and expiry.
+      *The `POST /v1/ops/impersonate` handler writes an append-only record with the actor, the tenant,
+      and the expiry the session actually got before it returns, and `GET /v1/ops/impersonations`
+      reads it back. Evidence: the ops cases in `apps/services/control-plane/test/http.test.ts` and
+      the impersonation cases in `apps/services/control-plane/test/identity.test.ts`.*
 
 **Non-goals**
 

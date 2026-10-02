@@ -26,6 +26,9 @@ import { createControlPlaneServer } from "../src/http.ts";
 import { InMemoryMedusaTargetStore } from "../src/medusa-target.ts";
 import { SellerOrderReader } from "../src/seller-orders.ts";
 import type { SellerReadTransport } from "../src/seller-orders.ts";
+import { HttpChannelConnectionClient } from "../src/channels.ts";
+import type { ChannelConnectionTransport } from "../src/channels.ts";
+import { InMemoryAuditLog } from "../src/audit.ts";
 import { createLogger } from "../src/logging.ts";
 import { SYNC_ENTITIES } from "@platform/contracts";
 
@@ -43,6 +46,8 @@ interface Harness {
   medusaKeys: InMemoryMedusaAdminKeyStore;
   /** Replace the tenant-engine transport so a seller read is exercised without a live instance. */
   setSellerTransport: (transport: SellerReadTransport) => void;
+  /** Replace the channel-service transport so a connection is exercised without the integration plane. */
+  setChannelTransport: (transport: ChannelConnectionTransport) => void;
   close: () => Promise<void>;
 }
 
@@ -100,6 +105,19 @@ async function startHarness(): Promise<Harness> {
     logger
   });
 
+  // Same seam for the channel service. The client is built once, as production builds it, and only
+  // its transport is swapped, so the request shape (path, bearer header, body) is what the test
+  // exercises.
+  let channelTransport: ChannelConnectionTransport = () => {
+    throw new Error("channel transport not installed by the test");
+  };
+  const channelConnections = new HttpChannelConnectionClient({
+    baseUrl: "https://integration.example.test",
+    serviceToken: SERVICE_TOKEN,
+    transport: (url, init) => channelTransport(url, init),
+    logger
+  });
+
   const server = createControlPlaneServer({
     registry,
     provisioning,
@@ -109,6 +127,8 @@ async function startHarness(): Promise<Harness> {
     medusaTargets,
     serviceTokens: [SERVICE_TOKEN],
     sellerOrders,
+    channelConnections,
+    auditLog: new InMemoryAuditLog(),
     logger
   });
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -125,6 +145,9 @@ async function startHarness(): Promise<Harness> {
     medusaKeys,
     setSellerTransport: (transport) => {
       sellerTransport = transport;
+    },
+    setChannelTransport: (transport) => {
+      channelTransport = transport;
     },
     close: () =>
       new Promise<void>((resolve) => {
@@ -594,6 +617,225 @@ test("the API", async (t) => {
       headers: { authorization: `Bearer ${viewerToken}` }
     });
     assert.equal(response.status, 200);
+  });
+
+  await t.test("a seller connects a channel and the control plane asks the channel service with its tenant", async () => {
+    const seen: { url: string; auth: string | undefined; body: unknown }[] = [];
+    harness.setChannelTransport(async (url, init) => {
+      seen.push({
+        url,
+        auth: (init.headers as Record<string, string>)?.authorization,
+        body: JSON.parse(String(init.body))
+      });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({ authorizeUrl: "https://auth.example.test/authorize?state=s1", state: "s1", expiresAt: NOW })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/channels/shopee/connect`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { authorizeUrl: string };
+    assert.ok(body.authorizeUrl.startsWith("https://auth.example.test/"));
+
+    // The tenant is the session's, not anything the caller sent, and the hop is authenticated with
+    // the service token (ADR 0008) rather than a seller session.
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0]?.body, { tenantId });
+    assert.equal(seen[0]?.auth, `Bearer ${SERVICE_TOKEN}`);
+    assert.ok(seen[0]?.url.endsWith("/v1/channels/shopee/authorize"));
+  });
+
+  await t.test("the channel list is scoped to the session's tenant and names every channel we serve", async () => {
+    let askedTenant: unknown = null;
+    harness.setChannelTransport(async (_url, init) => {
+      askedTenant = (JSON.parse(String(init.body)) as { tenantId: unknown }).tenantId;
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            connections: [
+              { tenantId, channel: "shopee", expiresAt: null, context: { shopId: "123" } }
+            ]
+          })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/channels`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      tenantId: string;
+      connections: { channel: string }[];
+      availableChannels: string[];
+    };
+
+    assert.equal(body.tenantId, tenantId);
+    // The tenant asked of the channel service is the session's; there is no id in the request to
+    // tamper with.
+    assert.equal(askedTenant, tenantId);
+    assert.deepEqual(body.connections.map((entry) => entry.channel), ["shopee"]);
+    // Every channel we serve is named, so the screen renders "hubungkan" without inferring absence.
+    assert.deepEqual(body.availableChannels, ["tiktok_tokopedia", "shopee", "lazada"]);
+  });
+
+  await t.test("a seller_viewer may see channels but may not connect or disconnect one", async () => {
+    const viewerToken = await login(harness.baseUrl, "viewer@example.com", GOOD_PASSWORD);
+    harness.setChannelTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ connections: [] })
+    }));
+
+    // `channel:read` is not a write, so a read-only seat keeps it.
+    const read = await fetch(`${harness.baseUrl}/v1/seller/channels`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(read.status, 200);
+
+    // Connecting and disconnecting are writes to a credential, and a viewer does not hold them.
+    const connect = await fetch(`${harness.baseUrl}/v1/seller/channels/shopee/connect`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(connect.status, 403);
+
+    const disconnect = await fetch(`${harness.baseUrl}/v1/seller/channels/shopee/disconnect`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(disconnect.status, 403);
+  });
+
+  await t.test("an operator impersonates a tenant and the session is read-only and recorded", async () => {
+    // The impersonated session must be able to read the tenant's orders.
+    harness.setSellerTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ orders: [], count: 0 })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/ops/impersonate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operatorToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ tenantId })
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      token: string;
+      role: string;
+      tenantId: string;
+      expiresAt: string;
+      actor: { email: string };
+    };
+
+    assert.equal(body.role, "seller_viewer");
+    assert.equal(body.tenantId, tenantId);
+    assert.equal(body.actor.email, "ops@example.com");
+
+    // Read-only: the impersonated session can read orders...
+    const read = await fetch(`${harness.baseUrl}/v1/seller/orders`, {
+      headers: { authorization: `Bearer ${body.token}` }
+    });
+    assert.equal(read.status, 200);
+
+    // ...but it is a viewer, so it cannot connect a channel (a credential write).
+    const write = await fetch(`${harness.baseUrl}/v1/seller/channels/shopee/connect`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${body.token}` }
+    });
+    assert.equal(write.status, 403);
+
+    // The audit trail names the actor and the tenant, with the expiry the session actually got.
+    const audit = await fetch(`${harness.baseUrl}/v1/ops/impersonations?tenantId=${tenantId}`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    assert.equal(audit.status, 200);
+    const auditBody = (await audit.json()) as {
+      impersonations: { actorEmail: string; tenantId: string; expiresAt: string }[];
+    };
+    assert.equal(auditBody.impersonations.length, 1);
+    assert.equal(auditBody.impersonations[0]?.actorEmail, "ops@example.com");
+    assert.equal(auditBody.impersonations[0]?.tenantId, tenantId);
+    assert.equal(auditBody.impersonations[0]?.expiresAt, body.expiresAt);
+  });
+
+  await t.test("a seller cannot reach the ops surface, and an operator cannot impersonate an unknown tenant", async () => {
+    // A seller credential must not reach either ops route.
+    const sellerImpersonate = await fetch(`${harness.baseUrl}/v1/ops/impersonate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ tenantId })
+    });
+    assert.equal(sellerImpersonate.status, 403);
+
+    const sellerAudit = await fetch(`${harness.baseUrl}/v1/ops/impersonations`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(sellerAudit.status, 403);
+
+    // Impersonating a tenant that does not exist fails before a session is minted.
+    const unknown = await fetch(`${harness.baseUrl}/v1/ops/impersonate`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${operatorToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: "tnt-does-not-exist" })
+    });
+    assert.equal(unknown.status, 404);
+
+    // And nothing was recorded for the failed attempt.
+    const audit = await fetch(`${harness.baseUrl}/v1/ops/impersonations?tenantId=tnt-does-not-exist`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    const auditBody = (await audit.json()) as { impersonations: unknown[] };
+    assert.equal(auditBody.impersonations.length, 0);
+  });
+
+  await t.test("the seller channel surface refuses an operator and a service token", async () => {
+    const operator = await fetch(`${harness.baseUrl}/v1/seller/channels`, {
+      headers: { authorization: `Bearer ${operatorToken}` }
+    });
+    assert.equal(operator.status, 403);
+
+    const service = await fetch(`${harness.baseUrl}/v1/seller/channels`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(service.status, 401);
+  });
+
+  await t.test("an unknown channel is a 404 before any request reaches the channel service", async () => {
+    let called = false;
+    harness.setChannelTransport(async () => {
+      called = true;
+      return { ok: true, status: 200, text: async () => "{}" };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/channels/not-a-channel/connect`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 404);
+    assert.equal(called, false, "an unknown channel must not be forwarded");
+  });
+
+  await t.test("a channel service that cannot be reached is an error, not an empty channel list", async () => {
+    harness.setChannelTransport(async () => {
+      throw new Error("connection refused");
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/channels`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    // "no channels connected" and "we could not ask" must not look the same.
+    assert.equal(response.status, 502);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "UPSTREAM_ERROR");
   });
 
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {

@@ -150,11 +150,12 @@ style.** Consistency matters more than design preference.
   commit messages, ADRs, and docs. Chat, summaries, and feedback to the user are written in
   **Indonesian**. Never use Chinese (Mandarin) in either — not in prose, not in identifiers, not
   as an accidental paste.
-  - **Exception — text a seller reads.** User-visible copy in the seller UI (`apps/web/oms-web`)
-    is Indonesian, because the people using it are Indonesian sellers and a half-translated screen
-    is worse than either language. This covers rendered strings and page `<title>`s only.
-    Identifiers, comments, test names, and everything the seller does not see stay English, so the
-    exception cannot quietly widen.
+  - **Exception — text a seller or operator reads.** User-visible copy in the seller UI
+    (`apps/web/oms-web`) and the operator console (`apps/web/ops-console`) is Indonesian, because
+    the people using them are Indonesian sellers and our own Indonesian-speaking support team, and
+    a half-translated screen is worse than either language. This covers rendered strings and page
+    `<title>`s only. Identifiers, comments, test names, and everything the reader does not see stay
+    English, so the exception cannot quietly widen.
 - **Runtime is Node with native TypeScript type stripping.** Relative imports carry real
   extensions (`./thing.ts`). Do not use `enum`, `namespace`, or parameter properties — type
   stripping does not support them. See `docs/adr/0006`.

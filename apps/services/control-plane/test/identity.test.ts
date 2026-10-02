@@ -234,6 +234,7 @@ function session(overrides: Partial<Session>): Session {
     role: "seller_owner",
     issuedAt: NOW,
     expiresAt: "2026-09-27T12:00:00.000Z",
+    impersonation: null,
     ...overrides
   };
 }
@@ -268,4 +269,125 @@ test("an operator may terminate tenants but may not touch commerce data", () => 
   // denied even though the operator can see the tenant.
   assert.throws(() => authorize(operator, "order:write", "tnt-a"));
   assert.throws(() => authorize(operator, "stock:write", "tnt-a"));
+});
+
+test("an operator impersonates a tenant with a short, read-only, attributable session", async () => {
+  const store = accounts();
+  await store.create({
+    email: "ops@example.com",
+    displayName: "Ops",
+    password: GOOD_PASSWORD,
+    role: "operator",
+    tenantId: null,
+    now: NOW
+  });
+
+  const sessions = new SessionManager({ accounts: store, now: () => NOW });
+  const operator = await sessions.login("ops@example.com", GOOD_PASSWORD);
+
+  const impersonated = await sessions.impersonate({ actor: operator, tenantId: "tnt-a" });
+
+  // Least privilege: support reads, it does not write.
+  assert.equal(impersonated.role, "seller_viewer");
+  assert.equal(impersonated.tenantId, "tnt-a");
+
+  // Time-boxed, and much shorter than the operator's own session.
+  assert.ok(
+    Date.parse(impersonated.expiresAt) < Date.parse(operator.expiresAt),
+    "an impersonation must expire sooner than a login"
+  );
+  assert.equal(impersonated.expiresAt, new Date(Date.parse(NOW) + 30 * 60 * 1000).toISOString());
+
+  // Attributable: the record names the person, not the tenant's staff.
+  assert.equal(impersonated.impersonation?.actorEmail, "ops@example.com");
+  assert.equal(impersonated.impersonation?.actorAccountId, operator.accountId);
+
+  // The impersonated session acts for the tenant but is not the tenant's account.
+  assert.equal(impersonated.accountId, operator.accountId);
+
+  // And it resolves like any other session, so the seller routes accept it.
+  assert.equal((await sessions.resolve(impersonated.token))?.tenantId, "tnt-a");
+});
+
+test("a seller may not impersonate, and an impersonated session may not impersonate again", async () => {
+  const store = accounts();
+  const seller = await store.create({
+    email: "seller@example.com",
+    displayName: "Seller",
+    password: GOOD_PASSWORD,
+    role: "seller_owner",
+    tenantId: "tnt-a",
+    now: NOW
+  });
+  await store.create({
+    email: "ops@example.com",
+    displayName: "Ops",
+    password: GOOD_PASSWORD,
+    role: "operator",
+    tenantId: null,
+    now: NOW
+  });
+
+  const sessions = new SessionManager({ accounts: store, now: () => NOW });
+
+  const sellerLogin = await sessions.login("seller@example.com", GOOD_PASSWORD);
+  assert.equal(sellerLogin.accountId, seller.id);
+  await assert.rejects(
+    () => sessions.impersonate({ actor: sellerLogin, tenantId: "tnt-b" }),
+    (error: unknown) => (error as { code?: string }).code === "FORBIDDEN"
+  );
+
+  const operator = await sessions.login("ops@example.com", GOOD_PASSWORD);
+  const impersonated = await sessions.impersonate({ actor: operator, tenantId: "tnt-a" });
+  // Chaining would make the audit trail point at a session rather than a person.
+  await assert.rejects(
+    () => sessions.impersonate({ actor: impersonated, tenantId: "tnt-b" }),
+    (error: unknown) => (error as { code?: string }).code === "FORBIDDEN"
+  );
+});
+
+test("an impersonated session stops working once its short TTL passes", async () => {
+  const store = accounts();
+  await store.create({
+    email: "ops@example.com",
+    displayName: "Ops",
+    password: GOOD_PASSWORD,
+    role: "operator",
+    tenantId: null,
+    now: NOW
+  });
+
+  let clock = NOW;
+  const sessions = new SessionManager({ accounts: store, now: () => clock });
+  const operator = await sessions.login("ops@example.com", GOOD_PASSWORD);
+  const impersonated = await sessions.impersonate({ actor: operator, tenantId: "tnt-a" });
+
+  assert.notEqual(await sessions.resolve(impersonated.token), null);
+
+  // Just past the impersonation TTL. The operator's own session, issued at the same instant, is
+  // still valid — so what ended the access is the time-box, not a logout.
+  clock = new Date(Date.parse(NOW) + 30 * 60 * 1000 + 1).toISOString();
+  assert.equal(await sessions.resolve(impersonated.token), null);
+  assert.notEqual(await sessions.resolve(operator.token), null);
+});
+
+test("a disabled operator cannot impersonate", async () => {
+  const store = accounts();
+  const created = await store.create({
+    email: "ops@example.com",
+    displayName: "Ops",
+    password: GOOD_PASSWORD,
+    role: "operator",
+    tenantId: null,
+    now: NOW
+  });
+
+  const sessions = new SessionManager({ accounts: store, now: () => NOW });
+  const operator = await sessions.login("ops@example.com", GOOD_PASSWORD);
+  await store.disable(created.id, NOW);
+
+  await assert.rejects(
+    () => sessions.impersonate({ actor: operator, tenantId: "tnt-a" }),
+    (error: unknown) => (error as { code?: string }).code === "FORBIDDEN"
+  );
 });

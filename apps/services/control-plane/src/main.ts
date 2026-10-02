@@ -32,6 +32,8 @@ import { PostgresSyncStateStore } from "./sync-state-store.ts";
 import { InMemoryMedusaTargetStore } from "./medusa-target.ts";
 import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
 import { SellerOrderReader } from "./seller-orders.ts";
+import { HttpChannelConnectionClient } from "./channels.ts";
+import { InMemoryAuditLog } from "./audit.ts";
 import { createTlsTransport, readOptionalCa } from "@platform/http-transport";
 
 async function main(): Promise<void> {
@@ -160,6 +162,15 @@ async function main(): Promise<void> {
     logger
   });
 
+  // Channel connections (docs/PLAN.md M5). The control plane owns the seller session, the
+  // integration plane owns the credential; this client joins them over the service-token surface
+  // (ADR 0008). The same token the worker presents, so there is one shared secret to rotate.
+  const channelConnections = new HttpChannelConnectionClient({
+    baseUrl: process.env.INTEGRATION_PLANE_BASE_URL ?? "http://127.0.0.1:4002",
+    serviceToken: (process.env.INTEGRATION_SERVICE_TOKENS ?? "").split(",")[0]?.trim() ?? "",
+    logger
+  });
+
   const server = createControlPlaneServer({
     registry,
     provisioning,
@@ -169,6 +180,8 @@ async function main(): Promise<void> {
     medusaTargets,
     serviceTokens,
     sellerOrders,
+    channelConnections,
+    auditLog: new InMemoryAuditLog(),
     logger
   });
   const port = Number(process.env.CONTROL_PLANE_PORT ?? 4001);

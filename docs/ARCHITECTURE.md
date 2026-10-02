@@ -63,10 +63,14 @@ Owns everything about *who the tenant is*, not *what they sell*.
 - Billing and usage metering.
 - Seller commerce reads, proxied to the tenant's own Medusa Admin API on behalf of a session
   (`/v1/seller/...`, ADR 0016). This is a *read-through*: the data is never stored here.
+- Operator support surface (`/v1/ops/...`, ADR 0019): a time-boxed, read-only impersonation of one
+  tenant for support, plus an append-only audit log of every impersonation. The impersonated session
+  is a `seller_viewer`, so support reads through the seller's own routes and cannot write.
 
 **Never** stores product, order, or stock data. Those live in the tenant data plane. The control
 plane does **read** tenant commerce data, but only by calling the tenant's Medusa Admin API and only
-to answer a seller's own request (ADR 0016); it holds no copy of it.
+to answer a seller's own request (ADR 0016); it holds no copy of it. The impersonation audit log is
+platform-owned metadata about *who looked*, not a copy of what they saw.
 
 ### Integration plane (`apps/services/integration-plane`)
 

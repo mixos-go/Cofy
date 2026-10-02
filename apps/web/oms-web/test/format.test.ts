@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { formatMoney, formatTimestamp } from "../src/format.ts";
+import { channelLabel, formatExpiry, formatMoney, formatTimestamp } from "../src/format.ts";
 
 test("sen are converted to whole rupiah at the display boundary", () => {
   // Rp 20.000 is 2_000_000 sen. The separator is a period in id-ID, and the space after "Rp" is
@@ -18,4 +18,24 @@ test("an unusable timestamp is shown as absent, not as an invalid date", () => {
   assert.equal(formatTimestamp(""), "—");
   assert.equal(formatTimestamp("not-a-date"), "—");
   assert.equal(formatTimestamp("2026-09-26T17:12:22.614Z"), "2026-09-26 17:12");
+});
+
+test("a channel code is shown as the marketplace's own name", () => {
+  assert.equal(channelLabel("tiktok_tokopedia"), "TikTok Shop / Tokopedia");
+  assert.equal(channelLabel("shopee"), "Shopee");
+  // An unknown code falls back to itself rather than to a blank: showing the raw code is ugly but
+  // honest, and hiding it would make a new channel look like a rendering bug.
+  assert.equal(channelLabel("mystery"), "mystery");
+});
+
+test("an expiry is phrased as a deadline a seller can act on", () => {
+  const now = new Date("2026-09-26T00:00:00.000Z");
+
+  // A credential the marketplace does not expire is not "expired" and must not read as such.
+  assert.equal(formatExpiry(null, now), "Tidak kedaluwarsa");
+  assert.equal(formatExpiry("2026-09-26T12:00:00.000Z", now), "Kedaluwarsa hari ini");
+  assert.equal(formatExpiry("2026-09-27T12:00:00.000Z", now), "Kedaluwarsa besok");
+  assert.equal(formatExpiry("2026-09-30T00:00:00.000Z", now), "Kedaluwarsa dalam 4 hari");
+  assert.equal(formatExpiry("2026-09-25T00:00:00.000Z", now), "Sudah kedaluwarsa — sambungkan ulang");
+  assert.equal(formatExpiry("not-a-date", now), "—");
 });
