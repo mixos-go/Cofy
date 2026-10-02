@@ -37,6 +37,15 @@ export default tseslint.config(
     rules: { "no-console": "off" }
   },
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.medusa/**"]
+    // Build output is not source. `.next` holds compiled chunks, and `next build` *generates*
+    // `next-env.d.ts` next to the tsconfig, so linting either fails on generated code the moment
+    // someone builds before checking. ESLint does not read .gitignore, so these are named here.
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/.medusa/**",
+      "**/.next/**",
+      "**/next-env.d.ts"
+    ]
   }
 );
