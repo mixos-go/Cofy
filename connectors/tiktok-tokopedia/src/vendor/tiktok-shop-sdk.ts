@@ -17,3 +17,16 @@ export type {
   UpdateInventoryRequest
 } from "../../vendor/tiktok-shop-sdk/dist/generated/Product/index.js";
 export type { UpdateShippingInfoResponse } from "../../vendor/tiktok-shop-sdk/dist/generated/Fulfillment/index.js";
+export type {
+  CreatePackagesRequest,
+  CreatePackagesResponse,
+  GetEligibleShippingServiceRequest,
+  GetEligibleShippingServiceResponse,
+  GetPackageShippingDocumentRequest,
+  GetPackageShippingDocumentResponse,
+  GetTrackingRequest,
+  GetTrackingResponse,
+  ShipPackageRequest,
+  ShipPackageBody,
+  ShipPackageResponse
+} from "../../vendor/tiktok-shop-sdk/dist/generated/Fulfillment/index.js";

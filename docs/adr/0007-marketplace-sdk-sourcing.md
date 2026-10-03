@@ -94,6 +94,15 @@ Concretely:
 
 ## Relationship to ADR 0003 and ADR 0005
 
+> Correction note (ADR 0021): an M7 known-limit recorded that Shopee's `ship_order` could not be
+> expressed through the vendored SDK. That was wrong. `ShopeeLogisticsApi.shipOrder`
+> (`vendor/shopee-sdk/dist/generated/Logistics/index.d.ts:1685`) and its body type
+> `ShipOrderRequest` (`:1242`, with `pickup.tracking_number`) exist, alongside
+> `getShippingParameter`, `getTrackingNumber` and the shipping-document methods. The capability was
+> unimplemented, not impossible; ADR 0021 makes it part of the channel shipping-arrangement surface.
+> This does not change this ADR's decision — the SDK is still consumed unmodified through the
+> connector.
+
 This ADR **does not amend** ADR 0003 or ADR 0005, and we deliberately did not invent an amendment
 for the sake of one. Both already make the right calls, and the toolkit confirms them:
 

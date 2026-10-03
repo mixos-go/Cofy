@@ -26,4 +26,25 @@ export interface ChannelCapabilities {
    * (ADR 0009's rule).
    */
   readonly supportsTrackingWriteBack: boolean;
+  /**
+   * True when the channel arranges its own logistics: we can ask it what a shipment needs
+   * (`getShippingArrangementParameters`), have it book the waybill (`arrangeShipment`) and read the
+   * waybill it issued (docs/adr/0021). This is the primary fulfillment path for Shopee and TikTok
+   * Shop/Tokopedia, where the marketplace is the logistics orchestrator. `false` means the channel
+   * offers no such operation and the arrangement is never attempted; a connector flips this to
+   * `true` only when it implements and tests the methods (ADR 0009's rule).
+   */
+  readonly supportsShippingArrangement: boolean;
+  /**
+   * True when the channel can produce the printable label for a shipment it arranged
+   * (`fetchShippingLabel`), typically a PDF the warehouse prints (docs/adr/0021). Gated separately
+   * from arrangement: a channel can arrange a shipment without exposing the label document.
+   */
+  readonly supportsShippingLabel: boolean;
+  /**
+   * True when the channel reports tracking events for an order it arranged
+   * (`fetchChannelTracking`), so the delivery-status pull path has a source (docs/adr/0021). A
+   * self-arranged shipment is tracked at the courier instead.
+   */
+  readonly supportsChannelTracking: boolean;
 }

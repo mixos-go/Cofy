@@ -1,9 +1,17 @@
 # ADR 0020 — Courier fulfillment providers are connectors, and rate shopping is a pure auditable rule
 
-- **Status:** Accepted
+- **Status:** Accepted, **amended by ADR 0021**
 - **Date:** 2026-09-26
 - **Deciders:** Cofy platform engineering
 
+> Amendment note (ADR 0021): this ADR's decisions about *where* a courier integration lives and
+> about rate shopping being a pure auditable rule stand. Its assumption about *who creates the
+> shipment* is amended: for Shopee and TikTok Shop/Tokopedia the marketplace arranges logistics
+> (books the waybill, issues the label, owns buyer tracking), so channel shipping arrangement is the
+> primary M7 path and courier providers serve self-arranged shipping. ADR 0021 also corrects the M7
+> note that Shopee's `ship_order` is not expressible through the vendored SDK — `shipOrder`,
+> `getShippingParameter`, `getTrackingNumber` and the label methods all exist.
+>
 > Approval note: the courier-neutral contracts, the pure rate-shopping rule, `packages/courier-sdk`
 > and the integration plane's courier provider surface were additive and built first (the surface is
 > proven with in-test providers in `apps/services/integration-plane/test/couriers.test.ts`; a real

@@ -1,12 +1,17 @@
 import type {
+  ArrangedShipment,
   ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
   ChannelStockLevel,
+  ChannelTrackingPage,
   Cursor,
   Instant,
   Page,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel,
   StockResult,
   StockUpdate,
   TrackingWriteBack
@@ -83,6 +88,53 @@ export interface ChannelConnector {
     tracking: TrackingWriteBack,
     credential: Credential
   ): Promise<void>;
+
+  /**
+   * What the channel needs to arrange this order's shipment, and the couriers/services it offers
+   * (docs/adr/0021). This is the primary fulfillment path for channels that orchestrate logistics.
+   *
+   * A channel that does not arrange shipments declares
+   * `capabilities().supportsShippingArrangement` as `false` and this method throws rather than
+   * returning an empty list, so a caller cannot mistake "no arrangement" for "no support" (ADR
+   * 0009's rule).
+   */
+  getShippingArrangementParameters(
+    externalOrderId: string,
+    credential: Credential
+  ): Promise<ShippingArrangementParameters>;
+
+  /**
+   * Have the channel book the shipment (or record the seller's own waybill) and return the waybill
+   * it issued together with the channel's shipping status, normalised (docs/adr/0021).
+   *
+   * Gated by `capabilities().supportsShippingArrangement`. The channel decides from its own
+   * arrangement parameters whether the request names a channel option or a self-ship waybill; a
+   * caller sends exactly one, so the connector never has to guess.
+   */
+  arrangeShipment(
+    request: ShippingArrangementRequest,
+    credential: Credential
+  ): Promise<ArrangedShipment>;
+
+  /**
+   * The printable label for a shipment the channel arranged (docs/adr/0021). Gated by
+   * `capabilities().supportsShippingLabel`; a channel that arranges shipments but exposes no label
+   * document declares that `false` and this throws.
+   */
+  fetchShippingLabel(
+    externalOrderId: string,
+    credential: Credential
+  ): Promise<ShippingLabel>;
+
+  /**
+   * The tracking events the channel holds for an order it arranged (docs/adr/0021), normalised to
+   * `TrackingEvent` so the delivery-status pull path treats a channel-arranged shipment exactly like
+   * a courier-arranged one. Gated by `capabilities().supportsChannelTracking`.
+   */
+  fetchChannelTracking(
+    externalOrderId: string,
+    credential: Credential
+  ): Promise<ChannelTrackingPage>;
 
   /** Webhook handlers keyed by the event type the marketplace sends. */
   webhookHandlers(): Readonly<Record<string, WebhookHandler>>;

@@ -4,6 +4,7 @@ export * from "./orders.ts";
 export * from "./listings.ts";
 export * from "./stock.ts";
 export * from "./fulfillment.ts";
+export * from "./shipping.ts";
 export * from "./courier-rules.ts";
 export * from "./sync.ts";
 export * from "./errors.ts";

@@ -36,6 +36,22 @@ export type {
   UpdateStockRequest
 } from "../../vendor/shopee-sdk/dist/generated/Product/index.js";
 export type {
+  CreateShippingDocumentRequest,
+  CreateShippingDocumentResponse,
+  DownloadShippingDocumentRequest,
+  DownloadShippingDocumentResponse,
+  GetShippingDocumentParameterRequest,
+  GetShippingDocumentParameterResponse,
+  GetShippingParameterRequest,
+  GetShippingParameterResponse,
+  GetTrackingInfoRequest,
+  GetTrackingInfoResponse,
+  GetTrackingNumberRequest,
+  GetTrackingNumberResponse,
+  ShipOrderRequest,
+  ShipOrderResponse
+} from "../../vendor/shopee-sdk/dist/generated/Logistics/index.js";
+export type {
   GetAccessTokenRequest,
   GetAccessTokenResponse,
   RefreshAccessTokenRequest,
