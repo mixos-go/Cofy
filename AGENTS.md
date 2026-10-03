@@ -640,3 +640,12 @@ Hard-won specifics from turning "order X shipped with waybill Y" into the engine
   node-postgres raised `terminating connection due to administrator command` *after* the test had
   reported — an `uncaughtException` that fails the whole file while every assertion is green. Order
   the teardown in one hook: stop the server, `await pool.end()`, close the schema admin, then drop.
+- **The fulfillment *is* the shipment record, so the seller read needs no new tenant route.** Both
+  arrangement paths (channel-booked and courier-booked) end as a Medusa fulfillment, so shipment
+  visibility is a projection off the order read — `GET /admin/orders/:id` with `*fulfillments`,
+  `*fulfillments.labels` and `*fulfillments.metadata` — not a `/shipments` route beside it
+  (docs/adr/0016, 0021). The projection must be as defensive as the order one: a fulfillment with no
+  id is skipped, an unrecognised `arrangement` reads as `null`, malformed events are dropped, and a
+  fulfillment with no label still projects (the seller has to see that the order shipped). The
+  end-to-end proof is in `test/integration/shipment-write-path.test.ts`, where the seller read
+  returns the very shipment the write path recorded.
