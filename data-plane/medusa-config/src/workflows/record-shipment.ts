@@ -38,10 +38,12 @@ export interface RecordShipmentInput {
     readonly sku: string;
     readonly quantity: number;
   }[];
-  /** The courier's waybill. */
+  /** The courier's or marketplace's waybill. */
   readonly trackingNumber: string;
-  /** A buyer-followable URL. `null` when the courier returned none. */
+  /** A buyer-followable URL. `null` when the courier or channel returned none. */
   readonly trackingUrl: string | null;
+  /** The printable label the courier or channel produced. `null` when none was fetched. */
+  readonly labelUrl: string | null;
   /** The stock location the units ship from. Optional; the engine resolves it from the shipping option. */
   readonly locationId?: string | null;
   /** The Medusa shipping option the order's shipping method names. Optional for the same reason. */
@@ -49,6 +51,12 @@ export interface RecordShipmentInput {
   /** The chosen courier, recorded on the fulfillment's metadata for the seller to see. */
   readonly courier: string;
   readonly serviceLevel: string;
+  /** Who arranged the waybill, so the track pass knows where to pull status from (docs/adr/0021). */
+  readonly arrangement: "channel" | "courier";
+  /** The channel the order came from, recorded so the track pass knows which connector to ask. */
+  readonly channel: string;
+  /** The channel's own order id, for a channel-arranged shipment. `null` for a self-arranged one. */
+  readonly externalOrderId: string | null;
 }
 
 export interface RecordShipmentResult {
@@ -177,7 +185,17 @@ const createShipmentRecordStep = createStep(
           items: resolved.lineItems.map((item) => ({ id: item.lineItemId, quantity: item.quantity })),
           ...(shipment.locationId ? { location_id: shipment.locationId } : {}),
           ...(shipment.shippingOptionId ? { shipping_option_id: shipment.shippingOptionId } : {}),
-          metadata: { courier: shipment.courier, service_level: shipment.serviceLevel }
+          metadata: {
+            courier: shipment.courier,
+            service_level: shipment.serviceLevel,
+            // Who arranged the waybill and where its status lives, so the delivery-status pull path
+            // can read it without a second table (docs/adr/0021). The metadata is on the engine's own
+            // fulfillment, so no core column is added (AGENTS.md §2.2).
+            arrangement: shipment.arrangement,
+            channel: shipment.channel,
+            external_order_id: shipment.externalOrderId,
+            shipment_status: "created"
+          }
         }
       })
     ).result;
@@ -193,7 +211,7 @@ const createShipmentRecordStep = createStep(
           {
             tracking_number: shipment.trackingNumber,
             tracking_url: shipment.trackingUrl ?? "",
-            label_url: ""
+            label_url: shipment.labelUrl ?? ""
           }
         ]
       }

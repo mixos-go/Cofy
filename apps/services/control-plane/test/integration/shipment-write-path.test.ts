@@ -10,7 +10,9 @@
  *   - the fulfillment is stamped shipped, so the order reads as handed to a courier rather than
  *     merely packed;
  *   - re-recording the same waybill converges on the first fulfillment instead of fulfilling the
- *     order's items twice — the retry the worker will actually make.
+ *     order's items twice — the retry the worker will actually make;
+ *   - the delivery-status pull path has its two ends: `/admin/shipments/active` returns the shipment
+ *     (docs/adr/0021) and `.../status` advances it, idempotently on a repeat.
  *
  * It reads the fulfillment's label and the reservation straight from the tenant schema, because the
  * assertion that matters is about the engine's rows, not about a response body. Skipped when
@@ -143,7 +145,10 @@ test(
         trackingNumber: waybill.trackingNumber,
         trackingUrl: waybill.trackingUrl,
         courier: "jne",
-        serviceLevel: "regular"
+        serviceLevel: "regular",
+        arrangement: "courier",
+        channel: "shopee",
+        externalOrderId: null
       }
     });
 
@@ -189,7 +194,10 @@ test(
           trackingNumber: waybill.trackingNumber,
           trackingUrl: waybill.trackingUrl,
           courier: "jne",
-          serviceLevel: "regular"
+          serviceLevel: "regular",
+          arrangement: "courier",
+          channel: "shopee",
+          externalOrderId: null
         }
       });
       assert.equal(second.status, 200, JSON.stringify(second.body));
@@ -203,6 +211,50 @@ test(
         `select count(*)::text as count from fulfillment`
       );
       assert.equal(rows[0]!.count, "1", "the retry must not create a second fulfillment");
+    });
+
+    await t.test("the active page returns the shipment, with its arrangement and handle", async () => {
+      const active = await call("/admin/shipments/active?limit=10");
+      assert.equal(active.status, 200, JSON.stringify(active.body));
+      const shipments = (active.body as { shipments: { fulfillmentId: string; arrangement: string; courier?: string; status: string }[] })
+        .shipments;
+      const found = shipments.find(
+        (entry) => entry.fulfillmentId === (first.body as { fulfillmentId: string }).fulfillmentId
+      );
+      assert.ok(found !== undefined, "the recorded shipment must be active and returned");
+      assert.equal(found.arrangement, "courier");
+      assert.equal(found.courier, "jne");
+      assert.equal(found.status, "created");
+    });
+
+    await t.test("a status advance is recorded and a repeat is a no-op", async () => {
+      const fulfillmentId = (first.body as { fulfillmentId: string }).fulfillmentId;
+      const advance = {
+        status: "in_transit",
+        events: [{ status: "in_transit", occurredAt: "2026-09-26T00:00:00.000Z", description: "Departed" }]
+      };
+
+      const firstAdvance = await call(`/admin/shipments/${fulfillmentId}/status`, {
+        method: "POST",
+        body: advance
+      });
+      assert.equal(firstAdvance.status, 200, JSON.stringify(firstAdvance.body));
+      assert.equal((firstAdvance.body as { advanced: boolean }).advanced, true);
+
+      // The same status again must not append a second event: the pass re-reads and converges.
+      const repeat = await call(`/admin/shipments/${fulfillmentId}/status`, {
+        method: "POST",
+        body: advance
+      });
+      assert.equal(repeat.status, 200, JSON.stringify(repeat.body));
+      assert.equal((repeat.body as { advanced: boolean }).advanced, false);
+
+      const { rows } = await pool.query<{ metadata: { shipment_status: string; shipment_events: unknown[] } }>(
+        `select metadata from fulfillment where id = $1`,
+        [fulfillmentId]
+      );
+      assert.equal(rows[0]!.metadata.shipment_status, "in_transit");
+      assert.equal(rows[0]!.metadata.shipment_events.length, 1, "the repeat must not duplicate the event");
     });
   }
 );

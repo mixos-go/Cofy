@@ -831,9 +831,17 @@ surface, quotes across couriers, applies `selectCourier`, books the chosen quote
 tenant-side Fulfillment, and queues `shipment.write_back` rather than calling the channel inline —
 so the channel write stays governed and retryable on its own (`apps/services/worker/src/shipment-create.ts`,
 `apps/services/worker/test/shipment-create.test.ts`). A real courier provider is blocked on sourcing a
-courier SDK (ADR 0007's vendoring rule); the courier surface is proven with in-test providers. The
-exit criteria are still unticked: they need the channel shipping-arrangement path, the delivery-status
-track pass and the UI.
+courier SDK (ADR 0007's vendoring rule); the courier surface is proven with in-test providers. ADR
+0021's primary path is now implemented end to end: the **`shipment.arrange` unit** has the channel
+book the waybill, records the tenant-side Fulfillment carrying it, and fetches the printable label
+into the fulfillment's `label_url` when the channel exposes one — the arrangement call is the
+write-back, so this path queues no `shipment.write_back`
+(`apps/services/worker/src/shipment-arrange.ts`, `apps/services/worker/test/shipment-arrange.test.ts`).
+The **delivery-status pull path** is built too: `shipment.track` reads the tenant's active shipments
+from the engine, asks the channel or the courier for the newest event, and writes forward advances
+through a new tenant-side `advanceShipmentWorkflow`
+(`apps/services/worker/src/shipment-track.ts`, `apps/services/worker/test/shipment-track.test.ts`).
+The exit criteria are still unticked: they need the OMS UI.
 
 **Deliverables**
 
@@ -882,11 +890,23 @@ track pass and the UI.
       over HTTP against a real Medusa (`test/integration/shipment-write-path.test.ts`), and the
       `shipment.create` unit joins quote → `selectCourier` → book → record → queue write-back
       (`apps/services/worker/test/shipment-create.test.ts`). Shopee's arrangement + write-back shape
-      is unblocked by ADR 0021 (methods exist in the vendored SDK); what remains is the arrangement
-      implementation and a real courier provider for the self-arranged path.)*
+      is unblocked by ADR 0021 (methods exist in the vendored SDK). **Channel-arranged is now
+      implemented:** the `shipment.arrange` unit (`apps/services/worker/src/shipment-arrange.ts`,
+      `apps/services/worker/test/shipment-arrange.test.ts`) has the channel book the waybill, records
+      the tenant-side Fulfillment carrying it, and fetches the printable label into the fulfillment's
+      `label_url` when the channel exposes one — the arrangement call is the write-back, so this path
+      queues no `shipment.write_back`. What remains is a real courier provider for the self-arranged
+      path and the UI.)*
 - [ ] Delivery status updates flow back and are visible in the OMS UI.
-      *(Design settled by ADR 0021: the plane pulls from the channel for a channel-arranged shipment
-      and from the courier for a self-arranged one; the track pass and the UI are next.)*
+      *(The pull path is delivered: `shipment.track` reads the tenant's active shipments from the
+      engine (`/admin/shipments/active`), asks the channel (`fetchChannelTracking`) for a
+      channel-arranged one and the courier (`CourierProvider.track`) for a self-arranged one, and
+      writes only forward advances through `advanceShipmentWorkflow`
+      (`apps/services/worker/src/shipment-track.ts`, `apps/services/worker/test/shipment-track.test.ts`;
+      the engine ends are proven over HTTP in
+      `apps/services/control-plane/test/integration/shipment-write-path.test.ts`). The pass rides the
+      reconciliation cadence and re-arms itself, and is only armed for a channel whose connector
+      reports channel tracking. What remains is the OMS UI.)*
 - [ ] Courier failures are surfaced with an actionable reason and a retry path.
       *(Half delivered: a failed quote is reported per courier with a neutral reason and does not
       sink the others, and a rate limit propagates as a reschedulable 429 rather than being hidden
@@ -917,11 +937,11 @@ track pass and the UI.
 - **No courier provider is registered in production yet.** The plane answers honestly that it serves
   none until a provider is vendored and wired in `main.ts`; a courier key configured with no provider
   is logged at startup rather than failing a request.
-- **Nothing enqueues `shipment.create` yet.** The unit is built and dispatched (proven in
-  `apps/services/worker/test/units.test.ts`), but the producer — a seller "ship this order" action
-  that enqueues the job — is part of the UI deliverable and is not wired. Until then the path is
-  reachable only by enqueuing the job directly. This mirrors how `shipment.write_back` had no
-  producer until `shipment.create` gained one.
+- **Nothing enqueues `shipment.create` or `shipment.arrange` yet.** Both units are built and
+  dispatched (proven in `apps/services/worker/test/units.test.ts`), but the producer — a seller "ship
+  this order" action that enqueues the job — is part of the UI deliverable and is not wired. Until
+  then each path is reachable only by enqueuing the job directly. This mirrors how `shipment.write_back`
+  had no producer until `shipment.create` gained one.
 - **Shopee's tracking write-back is not implemented yet (corrected by ADR 0021).** The M7 note that
   Shopee's `ship_order` "cannot be expressed through the vendored SDK" was **wrong**: `shipOrder`,
   `getShippingParameter`, `getTrackingNumber` and the shipping-document methods all exist. The

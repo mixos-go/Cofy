@@ -35,6 +35,8 @@ import { importOrdersOnce } from "./order-import.ts";
 import type { EventPublisher } from "./order-import.ts";
 import { pushStockOnce } from "./stock-push.ts";
 import { createShipmentOnce } from "./shipment-create.ts";
+import { arrangeShipmentOnce } from "./shipment-arrange.ts";
+import { trackShipmentsOnce } from "./shipment-track.ts";
 import { writeBackTrackingOnce } from "./tracking-writeback.ts";
 import { repairDrift } from "./drift.ts";
 import { reconcileStockOnce } from "./stock-reconcile.ts";
@@ -136,6 +138,37 @@ const shipmentCreatePayload = z
       requiresCod: z.boolean().default(false)
     }),
     couriers: z.array(z.enum(COURIER_CODES)).max(16).optional()
+  })
+  .strict();
+
+/**
+ * A shipment-arrange job (docs/PLAN.md M7, docs/adr/0021).
+ *
+ * The primary fulfillment path: the channel arranges the shipment. It carries the tenant's order id
+ * (what `recordShipment` addresses), the channel's external order id (what `arrangeShipment` and the
+ * label read address), the lines to ship (by SKU), the seller's arrangement choice, and the courier
+ * and service tier the choice named — recorded on the tenant-side shipment so the seller sees them.
+ * `fetchLabel` asks for the printable document too, when the caller wants it.
+ */
+const shipmentArrangePayload = z
+  .object({
+    orderId: z.string().min(1).max(128),
+    externalOrderId: z.string().min(1).max(128),
+    items: z
+      .array(z.object({ sku: z.string().min(1), quantity: z.number().int().positive() }))
+      .min(1),
+    arrangement: z
+      .object({
+        // Exactly one of the two is set: a channel-booked option, or the seller's own waybill
+        // (docs/adr/0021). The channel decides which applies from its own arrangement parameters.
+        channelOptionId: z.string().min(1).max(128).nullable().default(null),
+        pickupAddressId: z.string().min(1).max(128).nullable().default(null),
+        selfShipTrackingNumber: z.string().min(1).max(128).nullable().default(null)
+      })
+      .strict(),
+    courier: z.string().min(1).max(128),
+    serviceLevel: z.string().min(1).max(128),
+    fetchLabel: z.boolean().default(false)
   })
   .strict();
 
@@ -286,6 +319,7 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
           { syncState, couriers, rules: rateShoppingRules, commerce, events, logger },
           {
             tenantId: job.tenantId,
+            channel,
             orderId: parsed.orderId,
             items: parsed.items,
             shipment: { orderId: parsed.orderId, ...parsed.shipment },
@@ -310,6 +344,73 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
           chosen: outcome.selection.chosen !== null
         });
       });
+    },
+
+    // Arranging a channel shipment (docs/PLAN.md M7, docs/adr/0021). This is the *primary* path for
+    // Shopee and TikTok Shop/Tokopedia: the marketplace books the waybill, so there is no courier
+    // fan-out and no `shipment.write_back` — the arrangement call is itself the write-back. The unit
+    // records the tenant-side Fulfillment carrying the channel-issued waybill, and fetches the
+    // printable label when asked and the channel exposes one.
+    "shipment.arrange": async (job): Promise<WorkflowRunResult> => {
+      const channel = requireChannel(job);
+      return runUnit(job, logger, now, async () => {
+        const parsed = shipmentArrangePayload.parse(job.payload);
+        const outcome = await arrangeShipmentOnce(
+          { syncState, gateway, commerce, events, logger },
+          {
+            tenantId: job.tenantId,
+            channel,
+            orderId: parsed.orderId,
+            externalOrderId: parsed.externalOrderId,
+            items: parsed.items,
+            arrangement: {
+              externalOrderId: parsed.externalOrderId,
+              channelOptionId: parsed.arrangement.channelOptionId,
+              pickupAddressId: parsed.arrangement.pickupAddressId,
+              selfShipTrackingNumber: parsed.arrangement.selfShipTrackingNumber
+            },
+            courier: parsed.courier,
+            serviceLevel: parsed.serviceLevel,
+            fetchLabel: parsed.fetchLabel,
+            now
+          }
+        );
+
+        logger.info("unit.shipment.arrange.completed", {
+          tenantId: job.tenantId,
+          channel,
+          externalOrderId: parsed.externalOrderId,
+          trackingNumber: outcome.shipment?.trackingNumber ?? null,
+          skipped: outcome.skipped,
+          replayed: outcome.replayed,
+          label: outcome.label !== null
+        });
+      });
+    },
+
+    // The delivery-status pull pass (docs/PLAN.md M7, docs/adr/0021). It reads the tenant's active
+    // shipments, asks the channel or the courier for the newest event, and writes genuine advances
+    // back. It re-arms itself on the reconciliation cadence, like the other passes, so a restart
+    // resumes without a scheduler tick (ADR 0013).
+    "shipment.track": async (job): Promise<WorkflowRunResult> => {
+      const channel = requireChannel(job);
+      const result = await runUnit(job, logger, now, async () => {
+        emptyPayload.parse(job.payload);
+        const outcome = await trackShipmentsOnce(
+          { gateway, couriers, commerce, events, logger },
+          { tenantId: job.tenantId, channel }
+        );
+        logger.info("unit.shipment.track.completed", { tenantId: job.tenantId, channel, ...outcome });
+      });
+
+      if (result.kind === "completed") {
+        const runAt = nextReconcileRunAt(now());
+        await queue.schedule("shipment.track", job.tenantId, channel, {}, {
+          jobId: reArmedJobId("shipment.track", { tenantId: job.tenantId, channel }, runAt),
+          runAt
+        });
+      }
+      return result;
     },
 
     // Scheduled convergence and drift repair (docs/PLAN.md M4). Deliberately the *same* function the
@@ -374,7 +475,9 @@ export const REGISTERED_UNITS: readonly WorkflowUnit[] = [
   "listing.import",
   "stock.push",
   "shipment.create",
+  "shipment.arrange",
   "shipment.write_back",
+  "shipment.track",
   "reconcile.orders",
   "reconcile.stock"
 ];

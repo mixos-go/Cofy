@@ -43,6 +43,17 @@ export interface ReconciliationSchedulerOptions {
    * fail. Defaults to "no channel", so a caller that has not asked arms only order reconciliation.
    */
   readonly stockCapableChannels?: (channel: ChannelCode) => boolean;
+  /**
+   * Which channels can report delivery status for a shipment they arranged (docs/adr/0021), asked of
+   * the plane at startup like the stock capability.
+   *
+   * A track pass walks the tenant's *active* shipments; for a self-arranged shipment the source is a
+   * courier, not the channel, so a channel that cannot report tracking still has its courier-arranged
+   * shipments tracked. The flag therefore gates only the channel-arranged half, and the unit skips a
+   * channel-arranged shipment whose channel cannot report tracking rather than failing the pass.
+   * Defaults to "no channel", so a caller that has not asked arms no track pass at all.
+   */
+  readonly trackingCapableChannels?: (channel: ChannelCode) => boolean;
 }
 
 /** The job id a target's initial order pass uses. Stable, so a restart's `arm()` collapses onto it. */
@@ -55,9 +66,24 @@ export function stockReconciliationJobId(target: ReconciliationTarget): string {
   return `reconcile.stock:${target.tenantId}:${target.channel}`;
 }
 
+/** The job id a target's initial delivery-status pass uses (docs/adr/0021). */
+export function shipmentTrackJobId(target: ReconciliationTarget): string {
+  return `shipment.track:${target.tenantId}:${target.channel}`;
+}
+
+/** A cadenced unit: one that walks a tenant/channel and re-arms itself (docs/adr/0015, 0021). */
+export type CadencedUnit = "reconcile.orders" | "reconcile.stock" | "shipment.track";
+
 /** The base id for one unit's target. The unit is part of the id, so the passes never collide. */
-export function reconcileJobIdFor(unit: "reconcile.orders" | "reconcile.stock", target: ReconciliationTarget): string {
-  return unit === "reconcile.orders" ? reconciliationJobId(target) : stockReconciliationJobId(target);
+export function reconcileJobIdFor(unit: CadencedUnit, target: ReconciliationTarget): string {
+  switch (unit) {
+    case "reconcile.orders":
+      return reconciliationJobId(target);
+    case "reconcile.stock":
+      return stockReconciliationJobId(target);
+    case "shipment.track":
+      return shipmentTrackJobId(target);
+  }
 }
 
 /**
@@ -71,7 +97,7 @@ export function reconcileJobIdFor(unit: "reconcile.orders" | "reconcile.stock", 
  * current id, repeated re-arms stay finite.
  */
 export function reArmedJobId(
-  unit: "reconcile.orders" | "reconcile.stock",
+  unit: CadencedUnit,
   target: ReconciliationTarget,
   runAt: string
 ): string {
@@ -105,6 +131,7 @@ export class ReconciliationScheduler {
   async arm(): Promise<void> {
     const now = (this.#options.now ?? ((): Date => new Date()))();
     const stockCapable = this.#options.stockCapableChannels ?? ((): boolean => false);
+    const trackingCapable = this.#options.trackingCapableChannels ?? ((): boolean => false);
     for (const target of this.#options.targets) {
       const orderResult = await this.#options.queue.enqueue(
         "reconcile.orders",
@@ -123,20 +150,40 @@ export class ReconciliationScheduler {
       // Only a channel whose connector can report stock gets a stock pass. Arming one for a channel
       // that cannot would enqueue a walk whose first page throws on the capability check, which is
       // budget spent on a job that can never succeed (docs/adr/0015).
-      if (!stockCapable(target.channel)) continue;
-      const stockResult = await this.#options.queue.enqueue(
-        "reconcile.stock",
-        target.tenantId,
-        target.channel,
-        {},
-        { jobId: stockReconciliationJobId(target), runAt: now.toISOString() }
-      );
-      this.#options.logger.info("reconcile.armed", {
-        tenantId: target.tenantId,
-        channel: target.channel,
-        unit: "reconcile.stock",
-        deduped: stockResult.deduped
-      });
+      if (stockCapable(target.channel)) {
+        const stockResult = await this.#options.queue.enqueue(
+          "reconcile.stock",
+          target.tenantId,
+          target.channel,
+          {},
+          { jobId: stockReconciliationJobId(target), runAt: now.toISOString() }
+        );
+        this.#options.logger.info("reconcile.armed", {
+          tenantId: target.tenantId,
+          channel: target.channel,
+          unit: "reconcile.stock",
+          deduped: stockResult.deduped
+        });
+      }
+
+      // A track pass rides the same cadence (docs/adr/0021). It is only armed for a channel whose
+      // connector reports channel tracking; a channel without it still has its self-arranged
+      // shipments tracked by a courier, but arming here would be a walk with no channel source.
+      if (trackingCapable(target.channel)) {
+        const trackResult = await this.#options.queue.enqueue(
+          "shipment.track",
+          target.tenantId,
+          target.channel,
+          {},
+          { jobId: shipmentTrackJobId(target), runAt: now.toISOString() }
+        );
+        this.#options.logger.info("reconcile.armed", {
+          tenantId: target.tenantId,
+          channel: target.channel,
+          unit: "shipment.track",
+          deduped: trackResult.deduped
+        });
+      }
     }
   }
 }

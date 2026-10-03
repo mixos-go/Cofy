@@ -1,5 +1,5 @@
-import type { Instant, Money } from "./ids.ts";
-import type { ServiceLevel, ShipmentStatus, TrackingEvent } from "./fulfillment.ts";
+import type { ChannelCode, Instant, Money } from "./ids.ts";
+import type { ServiceLevel, Shipment, ShipmentArrangement, ShipmentStatus, TrackingEvent } from "./fulfillment.ts";
 
 /**
  * Channel shipping-arrangement shapes (docs/adr/0021).
@@ -109,4 +109,73 @@ export interface ShippingLabel {
 export interface ChannelTrackingPage {
   readonly externalOrderId: string;
   readonly events: readonly TrackingEvent[];
+}
+
+/**
+ * A shipment as the tenant's engine records it, from either arrangement path (docs/adr/0021).
+ *
+ * Deliberately *not* a `Shipment`: that type names one of our `CourierCode`s and a `ServiceLevel`,
+ * which a channel-arranged shipment cannot satisfy — the marketplace owns its own courier names and
+ * service tiers. So `courier`/`serviceLevel` are free-form strings here (our code, or the
+ * channel's own label), and `arrangement` says which system issued the waybill. The tenant-side
+ * Fulfillment is the same Medusa record either way; only the vocabulary differs.
+ */
+export interface ShipmentRecord {
+  readonly trackingNumber: string;
+  readonly trackingUrl: string | null;
+  /** A printable label reference, when the arranger produced one (docs/adr/0021). `null` otherwise. */
+  readonly labelUrl: string | null;
+  /** The channel the order came from, so the track pass knows which connector to ask. */
+  readonly channel: ChannelCode;
+  /** Our `CourierCode` for a self-arranged shipment, or the channel's courier name for a channel one. */
+  readonly courier: string;
+  /** Our service level for a self-arranged shipment, or the channel's own for a channel one. */
+  readonly serviceLevel: string;
+  readonly arrangement: ShipmentArrangement;
+  /** The channel's own order id, for a channel-arranged shipment. `null` for a self-arranged one. */
+  readonly externalOrderId: string | null;
+}
+
+/** Build the tenant-side record for a shipment one of our couriers booked (docs/adr/0020). */
+export function courierShipmentRecord(input: {
+  readonly channel: ChannelCode;
+  readonly shipment: Shipment;
+  readonly trackingUrl: string | null;
+  readonly labelUrl?: string | null;
+}): ShipmentRecord {
+  return {
+    trackingNumber: input.shipment.trackingNumber,
+    trackingUrl: input.trackingUrl,
+    labelUrl: input.labelUrl ?? null,
+    channel: input.channel,
+    courier: input.shipment.courier,
+    serviceLevel: input.shipment.serviceLevel,
+    arrangement: "courier",
+    externalOrderId: null
+  };
+}
+
+/** Build the tenant-side record for a shipment the channel arranged (docs/adr/0021). */
+export function channelShipmentRecord(input: {
+  readonly channel: ChannelCode;
+  readonly externalOrderId: string;
+  readonly arranged: ArrangedShipment;
+  /** The channel's courier label, from the arrangement option the seller chose. */
+  readonly courier: string;
+  /** The channel's own service tier, from the arrangement option the seller chose. */
+  readonly serviceLevel: string;
+  readonly trackingUrl: string | null;
+  /** A printable label reference the channel produced, when it exposes one. */
+  readonly labelUrl?: string | null;
+}): ShipmentRecord {
+  return {
+    trackingNumber: input.arranged.trackingNumber,
+    trackingUrl: input.trackingUrl,
+    labelUrl: input.labelUrl ?? null,
+    channel: input.channel,
+    courier: input.courier,
+    serviceLevel: input.serviceLevel,
+    arrangement: "channel",
+    externalOrderId: input.externalOrderId
+  };
 }

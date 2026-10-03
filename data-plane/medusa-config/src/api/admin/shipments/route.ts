@@ -44,7 +44,11 @@ export const POST = async (
       locationId: body.locationId ?? null,
       shippingOptionId: body.shippingOptionId ?? null,
       courier: body.courier,
-      serviceLevel: body.serviceLevel
+      serviceLevel: body.serviceLevel,
+      arrangement: body.arrangement,
+      channel: body.channel,
+      externalOrderId: body.externalOrderId,
+      labelUrl: body.labelUrl
     }
   });
 

@@ -89,8 +89,61 @@ export const RecordShipmentSchema = z.object({
   trackingUrl: z.string().url().max(1024).nullable().default(null),
   locationId: z.string().min(1).nullable().optional(),
   shippingOptionId: z.string().min(1).nullable().optional(),
-  courier: z.enum(["jne", "jnt", "sicepat", "anteraja", "rajaongkir"]),
-  serviceLevel: z.enum(["regular", "express", "same_day", "cargo"])
+  // The courier is free-form here: a self-arranged shipment sends our `CourierCode`, a
+  // channel-arranged one sends the marketplace's own courier name, which is not in our list
+  // (docs/adr/0021). The service level is free-form for the same reason.
+  courier: z.string().min(1).max(128),
+  serviceLevel: z.string().min(1).max(128),
+  // Who arranged the waybill, so the track pass knows whether to ask the channel or a courier.
+  arrangement: z.enum(["channel", "courier"]).default("courier"),
+  channel: z.enum(["tiktok_tokopedia", "shopee", "lazada"]),
+  externalOrderId: z.string().min(1).max(128).nullable().default(null),
+  labelUrl: z.string().max(2048).nullable().default(null)
 });
 
 export type RecordShipmentBody = z.infer<typeof RecordShipmentSchema>;
+
+/** A page of the tenant's active shipments the delivery-status pull path walks (docs/adr/0021). */
+export const ListActiveShipmentsSchema = z.object({
+  limit: z.coerce.number().int().positive().max(500).default(100)
+});
+
+/**
+ * A status advance for one shipment (docs/adr/0021).
+ *
+ * The track pass owns the decision of which event is newest and whether it is an advance; this body
+ * is only the write. The status is validated against a literal copy of the platform's list, and the
+ * events are normalised tracking events the engine stores for the seller to read.
+ */
+export const AdvanceShipmentSchema = z.object({
+  status: z.enum([
+    "created",
+    "picked_up",
+    "in_transit",
+    "out_for_delivery",
+    "delivered",
+    "failed",
+    "returned",
+    "cancelled"
+  ]),
+  events: z
+    .array(
+      z.object({
+        status: z.enum([
+          "created",
+          "picked_up",
+          "in_transit",
+          "out_for_delivery",
+          "delivered",
+          "failed",
+          "returned",
+          "cancelled"
+        ]),
+        occurredAt: z.string().min(1),
+        description: z.string().max(1024)
+      })
+    )
+    .default([])
+});
+
+export type AdvanceShipmentBody = z.infer<typeof AdvanceShipmentSchema>;

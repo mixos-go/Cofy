@@ -31,6 +31,7 @@ import {
 
 const TENANT = "tnt-a";
 const ORDER = "order-001";
+const CHANNEL = "shopee" as const;
 const silent: Logger = createLogger("error", {}, () => {});
 
 const REQUEST: ShipmentRequest = {
@@ -91,6 +92,7 @@ test("an order becomes a booked shipment, a fulfillment, and a shipment.created 
 
   const outcome = await createShipmentOnce(h.context, {
     tenantId: TENANT,
+    channel: CHANNEL,
     orderId: ORDER,
     items: ITEMS,
     shipment: REQUEST
@@ -133,6 +135,7 @@ test("a tenant rule forbidding the cheapest courier changes what ships", async (
 
   const outcome = await createShipmentOnce(h.context, {
     tenantId: TENANT,
+    channel: CHANNEL,
     orderId: ORDER,
     items: ITEMS,
     shipment: REQUEST
@@ -160,6 +163,7 @@ test("no qualifying quote books nothing and reports the actionable reason", asyn
 
   const outcome = await createShipmentOnce(h.context, {
     tenantId: TENANT,
+    channel: CHANNEL,
     orderId: ORDER,
     items: ITEMS,
     shipment: REQUEST
@@ -181,6 +185,7 @@ test("a courier that cannot quote does not sink the fan-out", async () => {
 
   const outcome = await createShipmentOnce(h.context, {
     tenantId: TENANT,
+    channel: CHANNEL,
     orderId: ORDER,
     items: ITEMS,
     shipment: REQUEST,
@@ -194,7 +199,7 @@ test("a courier that cannot quote does not sink the fan-out", async () => {
 test("re-running the same create replays: the courier is not asked for a second waybill", async () => {
   const h = harness();
   h.couriers.withQuotes("jne", [quote("jne")]);
-  const input = { tenantId: TENANT, orderId: ORDER, items: ITEMS, shipment: REQUEST };
+  const input = { tenantId: TENANT, channel: CHANNEL, orderId: ORDER, items: ITEMS, shipment: REQUEST };
 
   const first = await createShipmentOnce(h.context, input);
   const second = await createShipmentOnce(h.context, input);
@@ -216,6 +221,7 @@ test("a governor refusal defers: nothing is booked and the claim is released for
   await assert.rejects(
     createShipmentOnce(h.context, {
       tenantId: TENANT,
+      channel: CHANNEL,
       orderId: ORDER,
       items: ITEMS,
       shipment: REQUEST
@@ -227,6 +233,7 @@ test("a governor refusal defers: nothing is booked and the claim is released for
   // The retry must be able to take the claim: a deferred attempt owns no work.
   const retry = await createShipmentOnce(h.context, {
     tenantId: TENANT,
+    channel: CHANNEL,
     orderId: ORDER,
     items: ITEMS,
     shipment: REQUEST
@@ -243,6 +250,7 @@ test("a create failure after the quote records no success and publishes shipment
   await assert.rejects(
     createShipmentOnce(h.context, {
       tenantId: TENANT,
+      channel: CHANNEL,
       orderId: ORDER,
       items: ITEMS,
       shipment: REQUEST

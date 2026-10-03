@@ -249,6 +249,75 @@ test("a shipment.create that finds no qualifying quote queues no write-back", as
   assert.equal(await h.queue.take(NOW.toISOString()), null, "nothing to write back when nothing shipped");
 });
 
+test("a shipment.arrange job records the channel-arranged shipment and queues no write-back", async () => {
+  // The primary M7 path (docs/adr/0021): the channel arranges the waybill, the tenant's engine
+  // records the Fulfillment, and because the marketplace issued the number there is nothing to write
+  // back — so no shipment.write_back job may appear on the queue.
+  const h = harness();
+  h.commerce.withVariant("SKU-1", "var-1", 5);
+
+  const outcome = await dispatchJob(
+    job({
+      unit: "shipment.arrange",
+      payload: {
+        orderId: "order-001",
+        externalOrderId: "ext-1",
+        items: [{ sku: "SKU-1", quantity: 1 }],
+        arrangement: { channelOptionId: "opt-1", pickupAddressId: null, selfShipTrackingNumber: null },
+        courier: "J&T Express",
+        serviceLevel: "standard",
+        fetchLabel: true
+      }
+    }),
+    h.handlers,
+    h.queue,
+    silent
+  );
+
+  assert.equal(outcome.result, "completed");
+  assert.equal(h.gateway.arrangeCalls.length, 1, "the channel arranged the shipment");
+  assert.equal(h.gateway.labelCalls.length, 1, "the label was fetched");
+  assert.equal(h.commerce.shipments.length, 1, "the tenant's engine recorded the shipment");
+  assert.equal(h.commerce.shipments[0]?.shipment.arrangement, "channel");
+  assert.equal(await h.queue.take(NOW.toISOString()), null, "the arrangement call is the write-back");
+});
+
+test("a shipment.track job advances active shipments and re-arms itself", async () => {
+  const h = harness();
+  h.commerce.activeShipments = [
+    {
+      fulfillmentId: "ful-1",
+      orderId: "order-001",
+      trackingNumber: "CHANNEL-1",
+      channel: CHANNEL,
+      status: "created",
+      updatedAt: NOW.toISOString(),
+      arrangement: "channel",
+      externalOrderId: "ext-1"
+    }
+  ];
+  h.gateway.channelTrackingEvents = [
+    { status: "in_transit", occurredAt: NOW.toISOString(), description: "Departed" }
+  ];
+
+  const outcome = await dispatchJob(
+    job({ unit: "shipment.track", jobId: "shipment.track:tnt-a:shopee", channel: CHANNEL }),
+    h.handlers,
+    h.queue,
+    silent
+  );
+
+  assert.equal(outcome.result, "completed");
+  assert.equal(h.commerce.advances.length, 1);
+  assert.equal(h.commerce.advances[0]?.status, "in_transit");
+  const next = new Date(NOW.getTime() + 60_000).toISOString();
+  assert.equal(
+    h.queue.runAtOf(`shipment.track:tnt-a:shopee@${next}`),
+    next,
+    "the track pass scheduled its own next run"
+  );
+});
+
 test("a malformed payload is failed rather than silently ignored", async () => {
   const h = harness();
   const outcome = await dispatchJob(

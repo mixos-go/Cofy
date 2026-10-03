@@ -1,4 +1,4 @@
-import type { Instant, Money, OrderId } from "./ids.ts";
+import type { ChannelCode, Instant, Money, OrderId } from "./ids.ts";
 
 /**
  * Courier-neutral fulfillment shapes (docs/adr/0020).
@@ -109,6 +109,43 @@ export function isTerminalShipmentStatus(status: ShipmentStatus): boolean {
   return status === "delivered" || status === "returned" || status === "cancelled";
 }
 
+/**
+ * Where a non-terminal status sits in the forward delivery sequence.
+ *
+ * A courier can report events out of order, so a track pass that wrote whatever it read last could
+ * move a shipment *backwards* ("picked up" after "in transit"). Ranking the non-terminal statuses
+ * lets the pass treat a lower rank as stale rather than as an advance. The terminal statuses have no
+ * rank: they are decided by `isTerminalShipmentStatus`, not by position.
+ */
+const SHIPMENT_STATUS_RANK: Readonly<Record<ShipmentStatus, number | null>> = {
+  created: 0,
+  picked_up: 1,
+  in_transit: 2,
+  out_for_delivery: 3,
+  delivered: null,
+  failed: null,
+  returned: null,
+  cancelled: null
+};
+
+/**
+ * True when `to` is a genuine advance from `from`, so a track pass writes only forward moves.
+ *
+ * A terminal `from` never advances again (the shipment is done). The same status is not an advance
+ * (the re-read found nothing new). A terminal `to` is always an advance from a non-terminal `from`
+ * — a failure or return can arrive at any point in the sequence. Two non-terminal statuses advance
+ * only when the target's rank is higher, which is what stops an out-of-order courier event from
+ * moving the shipment backwards.
+ */
+export function isShipmentStatusAdvance(from: ShipmentStatus, to: ShipmentStatus): boolean {
+  if (isTerminalShipmentStatus(from)) return false;
+  if (from === to) return false;
+  if (isTerminalShipmentStatus(to)) return true;
+  const fromRank = SHIPMENT_STATUS_RANK[from];
+  const toRank = SHIPMENT_STATUS_RANK[to];
+  return fromRank !== null && toRank !== null && toRank > fromRank;
+}
+
 /** One tracking event, normalised. The newest by `occurredAt` is the shipment's current status. */
 export interface TrackingEvent {
   readonly status: ShipmentStatus;
@@ -132,6 +169,59 @@ export function latestShipmentStatus(events: readonly TrackingEvent[]): Shipment
   }
   return latest?.status ?? null;
 }
+
+/**
+ * Who arranged a shipment's waybill (docs/adr/0021).
+ *
+ * `channel` means the marketplace booked it (the primary path for Shopee and TikTok
+ * Shop/Tokopedia), so its delivery status is pulled from the channel. `courier` means one of our
+ * `CourierProvider`s booked it, so its status is pulled from the courier. The track pass branches
+ * on this rather than guessing from the waybill's shape.
+ */
+export const SHIPMENT_ARRANGEMENTS = ["channel", "courier"] as const;
+
+export type ShipmentArrangement = (typeof SHIPMENT_ARRANGEMENTS)[number];
+
+/** Narrow an untrusted string to a `ShipmentArrangement`, or null. */
+export function asShipmentArrangement(value: string): ShipmentArrangement | null {
+  return (SHIPMENT_ARRANGEMENTS as readonly string[]).includes(value)
+    ? (value as ShipmentArrangement)
+    : null;
+}
+
+/**
+ * One tenant shipment the track pass may still advance (docs/adr/0021).
+ *
+ * The tenant's engine is the source of truth for what has shipped, so the pass reads this from
+ * there rather than keeping a second shipment list in the platform. It is a discriminated union on
+ * `arrangement`, because the two paths pull from different systems and need different handles:
+ *
+ * - `channel` — the marketplace booked it, so the pass asks the channel and needs the channel code
+ *   and the marketplace's own order id.
+ * - `courier` — one of our providers booked it, so the pass asks the courier and needs its code.
+ *
+ * A shipment in a terminal status is not active and is not returned, so a delivered shipment is
+ * never polled again.
+ */
+export type ActiveShipment = {
+  readonly fulfillmentId: string;
+  readonly orderId: OrderId;
+  readonly trackingNumber: string;
+  /** The channel the order came from. A courier-arranged shipment still came from one channel. */
+  readonly channel: ChannelCode;
+  /** The last status the tenant recorded, so the pass can tell an advance from a re-read. */
+  readonly status: ShipmentStatus;
+  readonly updatedAt: Instant;
+} & (
+  | {
+      readonly arrangement: "channel";
+      readonly externalOrderId: string;
+    }
+  | {
+      readonly arrangement: "courier";
+      readonly courier: CourierCode;
+    }
+);
 
 /**
  * How a tenant wants couriers chosen. Platform config about *how the seller ships*, not commerce

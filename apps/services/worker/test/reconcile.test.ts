@@ -16,6 +16,7 @@ import {
   parseReconciliationTargets,
   reconciliationJobId,
   reArmedJobId,
+  shipmentTrackJobId,
   stockReconciliationJobId,
   ReconciliationScheduler
 } from "../src/reconcile.ts";
@@ -76,6 +77,41 @@ test("the stock pass gets its own job id, so the two passes cannot absorb each o
     reArmedJobId("reconcile.orders", target, runAt)
   );
   assert.ok(reArmedJobId("reconcile.stock", target, runAt).startsWith(stockReconciliationJobId(target)));
+});
+
+test("the track pass gets its own job id and is only armed for a tracking-capable channel", async () => {
+  const target = { tenantId: "tnt-a", channel: "shopee" as const };
+  const runAt = "2026-09-26T00:01:00.000Z";
+  assert.notEqual(
+    reArmedJobId("shipment.track", target, runAt),
+    reArmedJobId("reconcile.orders", target, runAt)
+  );
+  assert.ok(reArmedJobId("shipment.track", target, runAt).startsWith(shipmentTrackJobId(target)));
+
+  // A channel whose connector reports channel tracking gets a track pass; one that does not, does not.
+  const capableQueue = new InMemoryWorkflowQueue({ now: () => NOW.toISOString() });
+  const capable = new ReconciliationScheduler({
+    queue: capableQueue,
+    targets: [target],
+    intervalSeconds: 60,
+    logger: silent,
+    trackingCapableChannels: () => true,
+    now: () => NOW
+  });
+  await capable.arm();
+  assert.equal(capableQueue.runAtOf(shipmentTrackJobId(target)), NOW.toISOString());
+
+  const incapableQueue = new InMemoryWorkflowQueue({ now: () => NOW.toISOString() });
+  const incapable = new ReconciliationScheduler({
+    queue: incapableQueue,
+    targets: [target],
+    intervalSeconds: 60,
+    logger: silent,
+    trackingCapableChannels: () => false,
+    now: () => NOW
+  });
+  await incapable.arm();
+  assert.equal(incapableQueue.runAtOf(shipmentTrackJobId(target)), null);
 });
 
 test("parseReconciliationTargets accepts a tenant:channel list", () => {

@@ -2,8 +2,10 @@ import { validateAndTransformBody, validateAndTransformQuery } from "@medusajs/f
 import { defineMiddlewares } from "@medusajs/framework/http";
 
 import {
+  AdvanceShipmentSchema,
   CreateOrderSchema,
   FindChannelOrderLinkSchema,
+  ListActiveShipmentsSchema,
   ListStockLevelsSchema,
   ListVariantsSchema,
   RecordShipmentSchema,
@@ -68,6 +70,19 @@ export default defineMiddlewares({
       matcher: "/admin/shipments",
       methods: ["POST"],
       middlewares: [validateAndTransformBody(RecordShipmentSchema)]
+    },
+    // The delivery-status pull path (docs/adr/0021). The active read is bounded by the query schema
+    // so a caller cannot ask for an unbounded page; the status advance is validated before the
+    // workflow starts, so an unknown status never reaches the engine.
+    {
+      matcher: "/admin/shipments/active",
+      methods: ["GET"],
+      middlewares: [validateAndTransformQuery(ListActiveShipmentsSchema, {})]
+    },
+    {
+      matcher: "/admin/shipments/:fulfillmentId/status",
+      methods: ["POST"],
+      middlewares: [validateAndTransformBody(AdvanceShipmentSchema)]
     },
     // M6 WMS. The body schemas reject a malformed quantity or an unknown bin kind before a workflow
     // starts, so a bad request cannot leave a half-received purchase order behind.

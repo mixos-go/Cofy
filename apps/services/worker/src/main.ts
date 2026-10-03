@@ -158,15 +158,22 @@ async function main(): Promise<void> {
   // leaves the stock set empty and order reconciliation still arms, which is the safer default. The
   // answer is cached because capabilities are a property of the app registration, not of a connection.
   const stockCapable = new Map<ChannelCode, boolean>();
+  // The same probe answers whether a channel reports delivery tracking, which gates the track pass
+  // (docs/adr/0021). A channel without it still has its self-arranged shipments tracked at a courier,
+  // so this gates only whether a *channel* track pass is armed for the target.
+  const trackingCapable = new Map<ChannelCode, boolean>();
   for (const channel of new Set(targets.map((target) => target.channel))) {
     try {
-      stockCapable.set(channel, (await gateway.capabilities({ channel })).supportsStockSnapshotRead);
+      const capabilities = await gateway.capabilities({ channel });
+      stockCapable.set(channel, capabilities.supportsStockSnapshotRead);
+      trackingCapable.set(channel, capabilities.supportsChannelTracking);
     } catch (error) {
       logger.warn("startup.capability_probe_failed", {
         channel,
         errorMessage: error instanceof Error ? error.message : "unknown"
       });
       stockCapable.set(channel, false);
+      trackingCapable.set(channel, false);
     }
   }
 
@@ -175,7 +182,8 @@ async function main(): Promise<void> {
     targets,
     intervalSeconds,
     logger,
-    stockCapableChannels: (channel) => stockCapable.get(channel) === true
+    stockCapableChannels: (channel) => stockCapable.get(channel) === true,
+    trackingCapableChannels: (channel) => trackingCapable.get(channel) === true
   });
 
   const handlers = createWorkflowHandlers({

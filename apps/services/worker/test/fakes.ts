@@ -10,6 +10,7 @@
 
 import type { InMemorySyncStateStore } from "@platform/sync-state";
 import type {
+  ActiveShipment,
   ArrangedShipment,
   ChannelCapabilities,
   ChannelCode,
@@ -22,7 +23,9 @@ import type {
   RateShoppingRules,
   Shipment,
   ShipmentQuote,
+  ShipmentRecord,
   ShipmentRequest,
+  ShipmentStatus,
   ShippingArrangementParameters,
   ShippingArrangementRequest,
   ShippingLabel,
@@ -412,8 +415,7 @@ export class FakeCommerceClient implements CommerceClient {
     tenantId: TenantId;
     orderId: string;
     items: readonly { sku: string; quantity: number }[];
-    shipment: Shipment;
-    trackingUrl: string | null;
+    shipment: ShipmentRecord;
   }[] = [];
   /** When set, the next `recordShipment` throws this, to exercise the failure path. */
   recordShipmentError: Error | null = null;
@@ -425,8 +427,7 @@ export class FakeCommerceClient implements CommerceClient {
     readonly tenantId: TenantId;
     readonly orderId: string;
     readonly items: readonly { readonly sku: string; readonly quantity: number }[];
-    readonly shipment: Shipment;
-    readonly trackingUrl: string | null;
+    readonly shipment: ShipmentRecord;
   }): Promise<{ readonly fulfillmentId: string; readonly trackingNumber: string }> {
     if (this.recordShipmentError !== null) {
       const error = this.recordShipmentError;
@@ -443,6 +444,46 @@ export class FakeCommerceClient implements CommerceClient {
     this.#shipmentByWaybill.set(waybill, fulfillmentId);
     this.shipments.push({ ...input, items: [...input.items] });
     return { fulfillmentId, trackingNumber: input.shipment.trackingNumber };
+  }
+
+  /** Active shipments the track pass walks. `arranged` shipments are channel-arranged. */
+  activeShipments: ActiveShipment[] = [];
+  /** Status advances written, in order, so a test can prove what the engine recorded. */
+  readonly advances: {
+    tenantId: TenantId;
+    fulfillmentId: string;
+    status: ShipmentStatus;
+    events: readonly TrackingEvent[];
+  }[] = [];
+  /** When set, the next `listActiveShipments` throws this — e.g. the governor refusing the call. */
+  listActiveError: Error | null = null;
+  /** When set, the next `advanceShipment` throws this — e.g. a validation failure. */
+  advanceError: Error | null = null;
+
+  async listActiveShipments(input: {
+    readonly tenantId: TenantId;
+    readonly limit: number;
+  }): Promise<readonly ActiveShipment[]> {
+    if (this.listActiveError !== null) {
+      const error = this.listActiveError;
+      this.listActiveError = null;
+      throw error;
+    }
+    return this.activeShipments.slice(0, input.limit);
+  }
+
+  async advanceShipment(input: {
+    readonly tenantId: TenantId;
+    readonly fulfillmentId: string;
+    readonly status: ShipmentStatus;
+    readonly events: readonly TrackingEvent[];
+  }): Promise<void> {
+    if (this.advanceError !== null) {
+      const error = this.advanceError;
+      this.advanceError = null;
+      throw error;
+    }
+    this.advances.push({ ...input, events: [...input.events] });
   }
 }
 

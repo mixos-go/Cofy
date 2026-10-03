@@ -205,13 +205,15 @@ test("recordShipment posts the order, SKUs and waybill to the tenant's shipment 
     orderId: "order_1",
     items: [{ sku: "SHIP-SKU", quantity: 2 }],
     shipment: {
+      trackingNumber: "JNE-1",
+      trackingUrl: "https://track.example.test/JNE-1",
+      labelUrl: null,
+      channel: "shopee",
       courier: "jne",
       serviceLevel: "regular",
-      trackingNumber: "JNE-1",
-      status: "created",
-      createdAt: "2026-09-26T00:00:00.000Z"
-    },
-    trackingUrl: "https://track.example.test/JNE-1"
+      arrangement: "courier",
+      externalOrderId: null
+    }
   });
 
   assert.deepEqual(result, { fulfillmentId: "ful_1", trackingNumber: "JNE-1" });
@@ -225,6 +227,70 @@ test("recordShipment posts the order, SKUs and waybill to the tenant's shipment 
     trackingNumber: "JNE-1",
     trackingUrl: "https://track.example.test/JNE-1",
     courier: "jne",
-    serviceLevel: "regular"
+    serviceLevel: "regular",
+    arrangement: "courier",
+    channel: "shopee",
+    externalOrderId: null,
+    labelUrl: null
+  });
+});
+
+test("listActiveShipments reads the tenant's active page with the limit", async () => {
+  const seen: { url: string; method: string }[] = [];
+  const client = new HttpCommerceClient({
+    resolver: {
+      resolve: async () => ({ baseUrl: "https://a.medusa.example", secretKey: "key-a" })
+    },
+    transport: transportSeen(
+      {
+        shipments: [
+          {
+            fulfillmentId: "ful_1",
+            orderId: "order_1",
+            trackingNumber: "CHANNEL-1",
+            channel: "shopee",
+            status: "shipped",
+            updatedAt: "2026-09-26T00:00:00.000Z",
+            arrangement: "channel",
+            externalOrderId: "ext-1"
+          }
+        ]
+      },
+      seen
+    )
+  });
+
+  const shipments = await client.listActiveShipments({ tenantId: "tnt-a", limit: 50 });
+
+  assert.equal(shipments.length, 1);
+  assert.equal(shipments[0]?.fulfillmentId, "ful_1");
+  assert.equal(seen[0]?.url, "https://a.medusa.example/admin/shipments/active?limit=50");
+  assert.equal(seen[0]?.method, "GET");
+});
+
+test("advanceShipment posts the status and normalised events to the fulfillment's status route", async () => {
+  const seen: { url: string; method: string; body: unknown }[] = [];
+  const client = new HttpCommerceClient({
+    resolver: {
+      resolve: async () => ({ baseUrl: "https://a.medusa.example", secretKey: "key-a" })
+    },
+    transport: (async (url, init) => {
+      seen.push({ url, method: init.method ?? "GET", body: JSON.parse(String(init.body)) });
+      return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify({ advanced: true })) };
+    }) as Transport
+  });
+
+  await client.advanceShipment({
+    tenantId: "tnt-a",
+    fulfillmentId: "ful_1",
+    status: "in_transit",
+    events: [{ status: "in_transit", occurredAt: "2026-09-26T00:00:00.000Z", description: "Departed" }]
+  });
+
+  assert.equal(seen[0]?.url, "https://a.medusa.example/admin/shipments/ful_1/status");
+  assert.equal(seen[0]?.method, "POST");
+  assert.deepEqual(seen[0]?.body, {
+    status: "in_transit",
+    events: [{ status: "in_transit", occurredAt: "2026-09-26T00:00:00.000Z", description: "Departed" }]
   });
 });

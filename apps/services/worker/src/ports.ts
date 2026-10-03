@@ -16,6 +16,7 @@ import { PlatformError, isRetryable } from "@platform/contracts";
 import type { Transport } from "@platform/http-transport";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
+  ActiveShipment,
   ArrangedShipment,
   ChannelCapabilities,
   ChannelCode,
@@ -29,7 +30,9 @@ import type {
   RateShoppingRules,
   Shipment,
   ShipmentQuote,
+  ShipmentRecord,
   ShipmentRequest,
+  ShipmentStatus,
   ShippingArrangementParameters,
   ShippingArrangementRequest,
   ShippingLabel,
@@ -362,12 +365,16 @@ export interface CommerceClient {
   }): Promise<readonly MedusaStockLevel[]>;
 
   /**
-   * Record a booked courier shipment against the tenant's order (M7, docs/adr/0020).
+   * Record a booked shipment against the tenant's order (M7, docs/adr/0020, docs/adr/0021).
    *
-   * The courier call already happened in the integration plane; this is the tenant-side half that
-   * makes the engine's own records agree the order shipped — a Fulfillment that consumes the
-   * reservation, and a shipment carrying the waybill. The tenant's Medusa owns the fulfillment id;
-   * the caller gets it back so the write-back can be correlated to the shipment it came from.
+   * The courier/marketplace call already happened in the integration plane; this is the tenant-side
+   * half that makes the engine's own records agree the order shipped — a Fulfillment that consumes
+   * the reservation, and a shipment carrying the waybill. The tenant's Medusa owns the fulfillment
+   * id; the caller gets it back so the write-back can be correlated to the shipment it came from.
+   *
+   * `shipment.arrangement` and `shipment.externalOrderId` are how the tenant-side record remembers
+   * *who* booked the waybill, so the delivery-status pull path knows whether to ask the channel or a
+   * courier (docs/adr/0021).
    *
    * Idempotent on the waybill: a retried call for the same order and tracking number returns the
    * fulfillment the first call created rather than fulfilling the items twice.
@@ -377,9 +384,34 @@ export interface CommerceClient {
     readonly orderId: OrderId;
     /** The lines shipped, by our SKU — the same vocabulary an order import uses. */
     readonly items: readonly { readonly sku: string; readonly quantity: number }[];
-    readonly shipment: Shipment;
-    readonly trackingUrl: string | null;
+    readonly shipment: ShipmentRecord;
   }): Promise<{ readonly fulfillmentId: string; readonly trackingNumber: string }>;
+
+  /**
+   * The tenant's shipments that may still change, oldest first (M7, docs/adr/0021).
+   *
+   * The engine is the source of truth for what has shipped, so the track pass reads the active set
+   * from here rather than keeping a second shipment list in the platform. A shipment in a terminal
+   * status is not returned, so a delivered shipment is never polled again.
+   */
+  listActiveShipments(input: {
+    readonly tenantId: TenantId;
+    readonly limit: number;
+  }): Promise<readonly ActiveShipment[]>;
+
+  /**
+   * Advance a shipment's recorded status in the tenant's engine (M7, docs/adr/0021).
+   *
+   * The track pass owns the decision (which event is newest, whether it is an advance); this is
+   * only the write. Idempotent on the status: recording the status the shipment already holds is a
+   * no-op, so a re-read that found nothing new does not rewrite the record.
+   */
+  advanceShipment(input: {
+    readonly tenantId: TenantId;
+    readonly fulfillmentId: string;
+    readonly status: ShipmentStatus;
+    readonly events: readonly TrackingEvent[];
+  }): Promise<void>;
 }
 
 interface HttpOptions {
@@ -872,8 +904,7 @@ export class HttpCommerceClient implements CommerceClient {
     readonly tenantId: TenantId;
     readonly orderId: OrderId;
     readonly items: readonly { readonly sku: string; readonly quantity: number }[];
-    readonly shipment: Shipment;
-    readonly trackingUrl: string | null;
+    readonly shipment: ShipmentRecord;
   }) {
     const body = (await this.#request(input.tenantId, "/admin/shipments", {
       method: "POST",
@@ -881,12 +912,43 @@ export class HttpCommerceClient implements CommerceClient {
         orderId: input.orderId,
         items: input.items,
         trackingNumber: input.shipment.trackingNumber,
-        trackingUrl: input.trackingUrl,
+        trackingUrl: input.shipment.trackingUrl,
         courier: input.shipment.courier,
-        serviceLevel: input.shipment.serviceLevel
+        serviceLevel: input.shipment.serviceLevel,
+        arrangement: input.shipment.arrangement,
+        channel: input.shipment.channel,
+        externalOrderId: input.shipment.externalOrderId,
+        labelUrl: input.shipment.labelUrl
       })
     })) as { readonly fulfillmentId: string; readonly trackingNumber: string };
     return body;
+  }
+
+  async listActiveShipments(input: { readonly tenantId: TenantId; readonly limit: number }) {
+    const query = new URLSearchParams();
+    query.set("limit", String(input.limit));
+    const body = (await this.#request(
+      input.tenantId,
+      `/admin/shipments/active?${query.toString()}`,
+      { method: "GET" }
+    )) as { readonly shipments: readonly ActiveShipment[] };
+    return body.shipments;
+  }
+
+  async advanceShipment(input: {
+    readonly tenantId: TenantId;
+    readonly fulfillmentId: string;
+    readonly status: ShipmentStatus;
+    readonly events: readonly TrackingEvent[];
+  }) {
+    await this.#request(
+      input.tenantId,
+      `/admin/shipments/${encodeURIComponent(input.fulfillmentId)}/status`,
+      {
+        method: "POST",
+        body: JSON.stringify({ status: input.status, events: input.events })
+      }
+    );
   }
 }
 

@@ -30,8 +30,9 @@
  * rather than a blank failure.
  */
 
-import { PlatformError, selectCourier } from "@platform/contracts";
+import { PlatformError, courierShipmentRecord, selectCourier } from "@platform/contracts";
 import type {
+  ChannelCode,
   CourierCode,
   CourierSelection,
   OrderId,
@@ -63,6 +64,8 @@ export interface ShipmentCreateContext {
 
 export interface ShipmentCreateInput {
   readonly tenantId: TenantId;
+  /** The channel the order came from, recorded on the tenant-side shipment (docs/adr/0021). */
+  readonly channel: ChannelCode;
   /** The tenant's own order id, as the marketplace order became it (ADR 0010 point 3). */
   readonly orderId: OrderId;
   /** The lines to ship, by our SKU — the same vocabulary an order import and `recordShipment` use. */
@@ -89,7 +92,7 @@ export async function createShipmentOnce(
   input: ShipmentCreateInput
 ): Promise<ShipmentCreateOutcome> {
   const { syncState, couriers, rules, commerce, events, logger } = context;
-  const { tenantId, orderId, items, shipment } = input;
+  const { tenantId, channel, orderId, items, shipment } = input;
   const now = input.now ?? ((): Date => new Date());
 
   // The rules come from the control plane, not the tenant's engine: they are platform config about
@@ -186,8 +189,11 @@ export async function createShipmentOnce(
       tenantId,
       orderId,
       items,
-      shipment: booked,
-      trackingUrl: null
+      shipment: courierShipmentRecord({
+        channel,
+        shipment: booked,
+        trackingUrl: null
+      })
     });
     fulfillmentId = recorded.fulfillmentId;
   } catch (error) {
