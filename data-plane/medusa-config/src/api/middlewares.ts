@@ -6,6 +6,7 @@ import {
   FindChannelOrderLinkSchema,
   ListStockLevelsSchema,
   ListVariantsSchema,
+  RecordShipmentSchema,
   ReleaseOrderSchema
 } from "./admin/validators.ts";
 import {
@@ -59,6 +60,14 @@ export default defineMiddlewares({
       matcher: "/admin/channel-order-links",
       methods: ["GET"],
       middlewares: [validateAndTransformQuery(FindChannelOrderLinkSchema, {})]
+    },
+    // M7. A booked courier shipment is recorded as the engine's own fulfillment + shipment, so the
+    // body is validated before the workflow starts and a malformed waybill or unknown courier never
+    // reaches the engine (AGENTS.md §5).
+    {
+      matcher: "/admin/shipments",
+      methods: ["POST"],
+      middlewares: [validateAndTransformBody(RecordShipmentSchema)]
     },
     // M6 WMS. The body schemas reject a malformed quantity or an unknown bin kind before a workflow
     // starts, so a bad request cannot leave a half-received purchase order behind.

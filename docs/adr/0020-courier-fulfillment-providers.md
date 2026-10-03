@@ -13,6 +13,13 @@
 > the contract, the plane route `/v1/channels/:channel/tracking`, and the worker `shipment.write_back`
 > unit. The `connector:*` boundary allowance for `courier-sdk` is the one line in
 > `tooling/boundaries/src/config.js` this ADR already records as accepted; it is applied.
+>
+> M7 increment 3 built the tenant-side half this ADR's decision names: `CommerceClient.recordShipment`
+> and the data-plane route `/admin/shipments` run `recordShipmentWorkflow`, which turns a booked
+> shipment into the engine's own Fulfillment (consuming the order's reservation) plus the shipment
+> that carries the waybill. It is idempotent on the waybill — a retry converges on the first
+> fulfillment rather than fulfilling the items twice — and is proven end to end against a real Medusa
+> HTTP server (`apps/services/control-plane/test/integration/shipment-write-path.test.ts`).
 
 ## Context
 

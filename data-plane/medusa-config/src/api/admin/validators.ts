@@ -66,3 +66,31 @@ export const FindChannelOrderLinkSchema = z.object({
   channel: z.string().min(1),
   externalOrderId: z.string().min(1)
 });
+
+/** A line item the shipment fulfills, identified by our own SKU (the worker's vocabulary). */
+const shipmentItem = z.object({
+  sku: z.string().min(1),
+  quantity: z.number().int().positive()
+});
+
+/**
+ * A booked courier shipment recorded against a tenant order (M7, docs/adr/0020).
+ *
+ * The courier-neutral pair the plane booked: the waybill, its buyer URL when the courier gave one,
+ * and the courier/service the rate-shopping rule chose. The order and its items are ours, so the
+ * engine can consume the reservation. The courier and service level are validated against literal
+ * copies of the platform's lists rather than imported: a data-plane file may not depend on
+ * `@platform/*` (AGENTS.md §3), and the values only ever travel as strings on the wire.
+ */
+export const RecordShipmentSchema = z.object({
+  orderId: z.string().min(1),
+  items: z.array(shipmentItem).min(1),
+  trackingNumber: z.string().min(1).max(128),
+  trackingUrl: z.string().url().max(1024).nullable().default(null),
+  locationId: z.string().min(1).nullable().optional(),
+  shippingOptionId: z.string().min(1).nullable().optional(),
+  courier: z.enum(["jne", "jnt", "sicepat", "anteraja", "rajaongkir"]),
+  serviceLevel: z.enum(["regular", "express", "same_day", "cargo"])
+});
+
+export type RecordShipmentBody = z.infer<typeof RecordShipmentSchema>;

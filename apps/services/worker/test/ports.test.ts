@@ -183,3 +183,48 @@ test("listStockLevels repeats the sku query param and unwraps the levels", async
   // One `sku=` per value, which is the shape the route's validator accepts.
   assert.equal(seen[0]?.url, "https://a.medusa.example/admin/stock-levels?sku=SKU-1&sku=SKU-2");
 });
+
+test("recordShipment posts the order, SKUs and waybill to the tenant's shipment route", async () => {
+  const seen: { url: string; method: string; body: unknown }[] = [];
+  const client = new HttpCommerceClient({
+    resolver: {
+      resolve: async () => ({ baseUrl: "https://a.medusa.example", secretKey: "key-a" })
+    },
+    transport: (async (url, init) => {
+      seen.push({ url, method: init.method ?? "GET", body: JSON.parse(String(init.body)) });
+      return {
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve(JSON.stringify({ fulfillmentId: "ful_1", trackingNumber: "JNE-1" }))
+      };
+    }) as Transport
+  });
+
+  const result = await client.recordShipment({
+    tenantId: "tnt-a",
+    orderId: "order_1",
+    items: [{ sku: "SHIP-SKU", quantity: 2 }],
+    shipment: {
+      courier: "jne",
+      serviceLevel: "regular",
+      trackingNumber: "JNE-1",
+      status: "created",
+      createdAt: "2026-09-26T00:00:00.000Z"
+    },
+    trackingUrl: "https://track.example.test/JNE-1"
+  });
+
+  assert.deepEqual(result, { fulfillmentId: "ful_1", trackingNumber: "JNE-1" });
+  assert.equal(seen[0]?.url, "https://a.medusa.example/admin/shipments");
+  assert.equal(seen[0]?.method, "POST");
+  // The route's validator names these fields exactly; the courier/service travel as the shipment's
+  // own strings, and the waybill is flattened rather than nested, matching `RecordShipmentSchema`.
+  assert.deepEqual(seen[0]?.body, {
+    orderId: "order_1",
+    items: [{ sku: "SHIP-SKU", quantity: 2 }],
+    trackingNumber: "JNE-1",
+    trackingUrl: "https://track.example.test/JNE-1",
+    courier: "jne",
+    serviceLevel: "regular"
+  });
+});

@@ -30,7 +30,8 @@ import type {
   ChannelSkuMap,
   ChannelOrderRef,
   ChannelOrderRefStatus,
-  TrackingWriteBack
+  TrackingWriteBack,
+  Shipment
 } from "@platform/contracts";
 
 /** Platform-owned sync state (ADR 0010). Backed by the control-plane registry. */
@@ -255,6 +256,26 @@ export interface CommerceClient {
     readonly tenantId: TenantId;
     readonly skus: readonly string[];
   }): Promise<readonly MedusaStockLevel[]>;
+
+  /**
+   * Record a booked courier shipment against the tenant's order (M7, docs/adr/0020).
+   *
+   * The courier call already happened in the integration plane; this is the tenant-side half that
+   * makes the engine's own records agree the order shipped — a Fulfillment that consumes the
+   * reservation, and a shipment carrying the waybill. The tenant's Medusa owns the fulfillment id;
+   * the caller gets it back so the write-back can be correlated to the shipment it came from.
+   *
+   * Idempotent on the waybill: a retried call for the same order and tracking number returns the
+   * fulfillment the first call created rather than fulfilling the items twice.
+   */
+  recordShipment(input: {
+    readonly tenantId: TenantId;
+    readonly orderId: OrderId;
+    /** The lines shipped, by our SKU — the same vocabulary an order import uses. */
+    readonly items: readonly { readonly sku: string; readonly quantity: number }[];
+    readonly shipment: Shipment;
+    readonly trackingUrl: string | null;
+  }): Promise<{ readonly fulfillmentId: string; readonly trackingNumber: string }>;
 }
 
 interface HttpOptions {
@@ -613,6 +634,27 @@ export class HttpCommerceClient implements CommerceClient {
       method: "GET"
     })) as { readonly levels: readonly MedusaStockLevel[] };
     return body.levels;
+  }
+
+  async recordShipment(input: {
+    readonly tenantId: TenantId;
+    readonly orderId: OrderId;
+    readonly items: readonly { readonly sku: string; readonly quantity: number }[];
+    readonly shipment: Shipment;
+    readonly trackingUrl: string | null;
+  }) {
+    const body = (await this.#request(input.tenantId, "/admin/shipments", {
+      method: "POST",
+      body: JSON.stringify({
+        orderId: input.orderId,
+        items: input.items,
+        trackingNumber: input.shipment.trackingNumber,
+        trackingUrl: input.trackingUrl,
+        courier: input.shipment.courier,
+        serviceLevel: input.shipment.serviceLevel
+      })
+    })) as { readonly fulfillmentId: string; readonly trackingNumber: string };
+    return body;
   }
 }
 

@@ -30,7 +30,7 @@ This file is the **single source of truth for what we are building next**.
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Complete | M5 |
-| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping, the courier provider surface and the channel tracking write-back are delivered; real providers, the shipment-create workflow and delivery-status sync remain | M6 |
+| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping, the courier provider surface, the channel tracking write-back and the tenant-side shipment write path are delivered; real providers, the shipment-create workflow and delivery-status sync remain | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
 E0 is a prerequisite track (see below), not a milestone: the production egress decision and the
@@ -803,8 +803,9 @@ against the cadence at startup. Design: `docs/adr/0018`.
 
 **Goal.** Ship orders through Indonesian couriers without manual re-entry.
 
-**Status.** In progress. The **design, the rate-shopping core, the provider surface and the tracking
-write-back are delivered**: `docs/adr/0020` decides where a courier integration lives
+**Status.** In progress. The **design, the rate-shopping core, the provider surface, the tracking
+write-back and the tenant-side shipment write path are delivered**: `docs/adr/0020` decides where a
+courier integration lives
 (connector-style providers in the integration plane, with the shipment itself in the tenant's Medusa
 Fulfillment module), `packages/contracts/src/fulfillment.ts` adds the courier-neutral types and the
 pure `selectCourier` rule, `packages/courier-sdk` fixes the `CourierProvider` interface, and the
@@ -813,10 +814,13 @@ registered providers, books the quote rate shopping chose, tracks and cancels �
 governor, which now governs `CourierCode` on the same footing as `ChannelCode`. The tracking
 write-back to the channel is built (ADR 0020's approval-gated extension): the `ChannelConnector`
 gains `attachTrackingNumber` and a `supportsTrackingWriteBack` capability, the plane exposes
-`/v1/channels/:channel/tracking`, and the worker runs a `shipment.write_back` unit. A real courier
-provider is blocked on sourcing a courier SDK (ADR 0007's vendoring rule); the courier surface is
-proven with in-test providers. The exit criteria are still unticked: they need a real provider, the
-shipment-create workflow that joins a courier to a channel order, and the UI.
+`/v1/channels/:channel/tracking`, and the worker runs a `shipment.write_back` unit. The tenant-side
+half is built too: `CommerceClient.recordShipment` posts to a data-plane route that runs
+`recordShipmentWorkflow`, turning "order X shipped with waybill Y" into the engine's own Fulfillment
+(consuming the reservation) plus the shipment that carries the label, idempotent on the waybill. A
+real courier provider is blocked on sourcing a courier SDK (ADR 0007's vendoring rule); the courier
+surface is proven with in-test providers. The exit criteria are still unticked: they need a real
+provider, the shipment-create workflow that joins a courier to a channel order, and the UI.
 
 **Deliverables**
 
@@ -841,8 +845,11 @@ shipment-create workflow that joins a courier to a channel order, and the UI.
 
 - [ ] Fulfilling an order produces a tracking number and writes it back to the channel.
       *(Mostly delivered: the plane books a shipment and returns a waybill, and the write-back path
-      exists end to end — capability-gated, governed, idempotent on the waybill. What remains is the
-      shipment-create workflow that joins a booked courier shipment to the channel order and enqueues
+      exists end to end — capability-gated, governed, idempotent on the waybill. The tenant-side
+      record is built too: `recordShipment` turns the booked shipment into the engine's own
+      Fulfillment carrying the waybill and consumes the reservation, proven over HTTP against a real
+      Medusa (`test/integration/shipment-write-path.test.ts`). What remains is the shipment-create
+      workflow that joins a booked courier shipment to the channel order and enqueues
       `shipment.write_back`, and a real courier provider to book against.)*
 - [ ] Delivery status updates flow back and are visible in the OMS UI.
       *(Half delivered: the plane pulls a shipment's events from the provider; the track pass and

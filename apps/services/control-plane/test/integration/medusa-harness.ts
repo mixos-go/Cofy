@@ -21,6 +21,8 @@ export const MEDUSA_COMMAND = `${MEDUSA_CWD}/node_modules/.bin/medusa`;
 export const SEED_SCRIPT = "src/scripts/seed-tenant-order.ts";
 /** The M6 warehouse fixture, for tests that need a tenant with a stocked warehouse. */
 export const WMS_SEED_SCRIPT = "src/scripts/seed-tenant-wms.ts";
+/** The M7 fixture, for tests that need a shippable order with a reservation and a shipping method. */
+export const SHIPMENT_SEED_SCRIPT = "src/scripts/seed-tenant-shipment.ts";
 
 export function databaseUrlFor(base: string, databaseName: string): string {
   const url = new URL(base);

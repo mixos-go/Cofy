@@ -607,3 +607,36 @@ rationale: `docs/adr/0018`.
   the module is registered. The M6 integration test boots a real server, walks receipt → put-away →
   pick → stocktake over HTTP, and reads `inventory_level.stocked_quantity` out of the tenant schema
   to show the engine's number and the ledger's number moved together.
+
+---
+
+## 13. Lessons from the shipment write path
+
+Hard-won specifics from turning "order X shipped with waybill Y" into the engine's own fulfillment
+(M7 increment 3, `data-plane/medusa-config/src/workflows/record-shipment.ts`). Same rule as §9–§12.
+
+- **`createFulfillmentWorkflow` discards the labels you pass it.** The workflow forwards `labels` to
+  the fulfillment provider and then writes `providerResult.labels ?? []` back onto the record
+  (`FulfillmentModuleService.createFulfillment`). The `manual` provider returns `labels: []`
+  unconditionally, so a waybill handed to `createOrderFulfillmentWorkflow` is silently dropped — the
+  fulfillment is created, the reservation is consumed, and `fulfillment_label` stays empty. Record the
+  label on the *shipment* (`createShipmentWorkflow({ id, labels })`), which calls `updateFulfillment`
+  and persists it. This is invisible to any test that only asserts the fulfillment exists.
+- **`order.items[].id` and `order_item.id` are different id namespaces, and only one is a reservation's
+  `line_item_id`.** `reservation_item.line_item_id` holds `ordli_…` (the order *line item*), which is
+  what the query graph returns for `order.items[].id`; a raw `select id from order_item` returns
+  `orditem_…` (the order *item* join row) and matches nothing. `createOrderFulfillmentWorkflow` filters
+  reservations by the ids it read from `order.items[].id`, so a diagnostic that queries the table
+  directly and compares to a reservation's `line_item_id` looks like a mismatch in the workflow when
+  the workflow is correct — the two id spaces are the trap. Join through `order_item.item_id` to relate
+  them; do not compare `order_item.id` to a reservation.
+- **A consumed reservation is soft-deleted, not zeroed.** `prepareInventoryUpdate` pushes a fully
+  fulfilled reservation to `deleteReservationsStep`, so `reservation_item.quantity` stays at its old
+  value and only `deleted_at` moves. A test that asserts "the reservation was consumed" with
+  `where quantity > 0` keeps passing while the row is untouched — assert `where deleted_at is null`
+  instead, and read `inventory_level.stocked_quantity` to show the units actually left the location.
+- **A test pool opened against a database must close before the database is dropped.** The teardown
+  hook dropped the tenant database with `with (force)` while a `pg.Pool` still held a connection, so
+  node-postgres raised `terminating connection due to administrator command` *after* the test had
+  reported — an `uncaughtException` that fails the whole file while every assertion is green. Order
+  the teardown in one hook: stop the server, `await pool.end()`, close the schema admin, then drop.

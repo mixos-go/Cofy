@@ -15,6 +15,7 @@ import type {
   ChannelListing,
   ChannelOrder,
   ChannelStockLevel,
+  Shipment,
   StockResult,
   StockUpdate,
   TenantId,
@@ -311,5 +312,43 @@ export class FakeCommerceClient implements CommerceClient {
       levels.push({ sku, available: this.stock.get(variantId) ?? 0 });
     }
     return levels;
+  }
+
+  /** Shipments recorded, in order, so a test can prove what the engine was told. */
+  readonly shipments: {
+    tenantId: TenantId;
+    orderId: string;
+    items: readonly { sku: string; quantity: number }[];
+    shipment: Shipment;
+    trackingUrl: string | null;
+  }[] = [];
+  /** When set, the next `recordShipment` throws this, to exercise the failure path. */
+  recordShipmentError: Error | null = null;
+  /** `orderId:trackingNumber` -> fulfillment id, mirroring the workflow's waybill idempotency. */
+  readonly #shipmentByWaybill = new Map<string, string>();
+  #shipmentCounter = 0;
+
+  async recordShipment(input: {
+    readonly tenantId: TenantId;
+    readonly orderId: string;
+    readonly items: readonly { readonly sku: string; readonly quantity: number }[];
+    readonly shipment: Shipment;
+    readonly trackingUrl: string | null;
+  }): Promise<{ readonly fulfillmentId: string; readonly trackingNumber: string }> {
+    if (this.recordShipmentError !== null) {
+      const error = this.recordShipmentError;
+      this.recordShipmentError = null;
+      throw error;
+    }
+    const waybill = `${input.orderId}:${input.shipment.trackingNumber}`;
+    const existing = this.#shipmentByWaybill.get(waybill);
+    if (existing !== undefined) {
+      return { fulfillmentId: existing, trackingNumber: input.shipment.trackingNumber };
+    }
+    this.#shipmentCounter += 1;
+    const fulfillmentId = `ful-${String(this.#shipmentCounter).padStart(3, "0")}`;
+    this.#shipmentByWaybill.set(waybill, fulfillmentId);
+    this.shipments.push({ ...input, items: [...input.items] });
+    return { fulfillmentId, trackingNumber: input.shipment.trackingNumber };
   }
 }
