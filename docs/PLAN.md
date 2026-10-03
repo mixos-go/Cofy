@@ -30,7 +30,7 @@ This file is the **single source of truth for what we are building next**.
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Complete | M5 |
-| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping (rule + tenant rules store), the courier provider surface, the channel tracking write-back, the tenant-side shipment write path and the shipment-create workflow are delivered; a real provider and delivery-status sync remain | M6 |
+| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping (rule + tenant rules store), the courier provider surface, the channel tracking write-back, the tenant-side shipment write path, the shipment-create workflow and the delivery-status pull path are delivered, and the seller read now surfaces shipments and delivery status in the OMS; a real provider remains | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
 E0 is a prerequisite track (see below), not a milestone: the production egress decision and the
@@ -841,7 +841,16 @@ The **delivery-status pull path** is built too: `shipment.track` reads the tenan
 from the engine, asks the channel or the courier for the newest event, and writes forward advances
 through a new tenant-side `advanceShipmentWorkflow`
 (`apps/services/worker/src/shipment-track.ts`, `apps/services/worker/test/shipment-track.test.ts`).
-The exit criteria are still unticked: they need the OMS UI.
+The shipments are now **visible in the OMS**: the seller order detail projects the engine's
+fulfillments — the waybill, the courier, the arrangement, the normalised delivery status and its
+event timeline — off Medusa's own `GET /admin/orders/:id` (no new tenant route, ADR 0016), and the
+order list shows Medusa's `fulfillment_status`; the pages render them with the seller-facing labels
+and an `http(s)`-only link guard for tracking/label URLs
+(`apps/services/control-plane/src/seller-orders.ts`,
+`apps/web/oms-web/src/app/orders/[orderId]/page.tsx`,
+`apps/services/control-plane/test/integration/shipment-write-path.test.ts`).
+The exit criteria are still unticked: a real courier provider and the seller "ship this order"
+action remain.
 
 **Deliverables**
 
@@ -896,7 +905,8 @@ The exit criteria are still unticked: they need the OMS UI.
       the tenant-side Fulfillment carrying it, and fetches the printable label into the fulfillment's
       `label_url` when the channel exposes one — the arrangement call is the write-back, so this path
       queues no `shipment.write_back`. What remains is a real courier provider for the self-arranged
-      path and the UI.)*
+      path and the seller "ship this order" action that enqueues the unit; the OMS now *shows* the
+      resulting waybill and status.)*
 - [ ] Delivery status updates flow back and are visible in the OMS UI.
       *(The pull path is delivered: `shipment.track` reads the tenant's active shipments from the
       engine (`/admin/shipments/active`), asks the channel (`fetchChannelTracking`) for a
@@ -906,7 +916,14 @@ The exit criteria are still unticked: they need the OMS UI.
       the engine ends are proven over HTTP in
       `apps/services/control-plane/test/integration/shipment-write-path.test.ts`). The pass rides the
       reconciliation cadence and re-arms itself, and is only armed for a channel whose connector
-      reports channel tracking. What remains is the OMS UI.)*
+      reports channel tracking. **The UI half is delivered:** the seller order detail shows each
+      shipment's courier, arrangement, waybill (linked when the URL is `http(s)`), printable label,
+      normalised delivery status and event timeline, projected from Medusa's own
+      `GET /admin/orders/:id?fields=*fulfillments,...` with no extra tenant route (ADR 0016), and the
+      order list shows Medusa's `fulfillment_status`; the projection is unit-tested against stubbed
+      transport (`apps/services/control-plane/test/http.test.ts`) and end to end against a real
+      Medusa (`.../integration/shipment-write-path.test.ts`). What remains is the live track pass
+      running on the reconciliation cadence against a real channel connector.)*
 - [ ] Courier failures are surfaced with an actionable reason and a retry path.
       *(Half delivered: a failed quote is reported per courier with a neutral reason and does not
       sink the others, and a rate limit propagates as a reschedulable 429 rather than being hidden
@@ -939,8 +956,10 @@ The exit criteria are still unticked: they need the OMS UI.
   is logged at startup rather than failing a request.
 - **Nothing enqueues `shipment.create` or `shipment.arrange` yet.** Both units are built and
   dispatched (proven in `apps/services/worker/test/units.test.ts`), but the producer — a seller "ship
-  this order" action that enqueues the job — is part of the UI deliverable and is not wired. Until
-  then each path is reachable only by enqueuing the job directly. This mirrors how `shipment.write_back`
+  this order" action that enqueues the job — is not wired. Until then each path is reachable only by
+  enqueuing the job directly. The OMS now *shows* a shipment once it exists (waybill, courier,
+  arrangement, delivery status and event timeline on the order detail), so the missing piece is the
+  action that creates one, not the surface that reads it. This mirrors how `shipment.write_back`
   had no producer until `shipment.create` gained one.
 - **Shopee's tracking write-back is not implemented yet (corrected by ADR 0021).** The M7 note that
   Shopee's `ship_order` "cannot be expressed through the vendored SDK" was **wrong**: `shipOrder`,

@@ -2,7 +2,9 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-30 (amended: the seller read is now covered end to end by
-  `test/integration/seller-read.test.ts`)
+  `test/integration/seller-read.test.ts`; and the shipment/delivery-status projection of
+  `docs/PLAN.md` M7 rides on the same order read, covered by
+  `test/integration/shipment-write-path.test.ts`)
 - **Deciders:** Cofy platform engineering
 
 ## Context

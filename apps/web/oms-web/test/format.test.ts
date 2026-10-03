@@ -6,9 +6,13 @@ import {
   binKindLabel,
   formatDelta,
   formatVariance,
+  fulfillmentStatusLabel,
   movementKindLabel,
   pickTaskStatusLabel,
   purchaseOrderStatusLabel,
+  safeLinkUrl,
+  shipmentArrangementLabel,
+  shipmentStatusLabel,
   stocktakeStatusLabel
 } from "../src/format.ts";
 
@@ -81,4 +85,31 @@ test("a variance is phrased as over, short, or matching — not as a bare number
   assert.equal(formatVariance(-3), "Kurang 3");
   // An uncounted row has no variance yet, which is not the same as a variance of zero.
   assert.equal(formatVariance(null), "—");
+});
+
+test("shipment codes are shown as the words a seller uses", () => {
+  assert.equal(shipmentStatusLabel("created"), "Dibuat");
+  assert.equal(shipmentStatusLabel("in_transit"), "Dalam perjalanan");
+  assert.equal(shipmentStatusLabel("delivered"), "Terkirim");
+  assert.equal(shipmentArrangementLabel("channel"), "Dipesan kanal");
+  assert.equal(shipmentArrangementLabel("courier"), "Dipesan kurir kami");
+  assert.equal(fulfillmentStatusLabel("shipped"), "Dikirim");
+  assert.equal(fulfillmentStatusLabel("partially_shipped"), "Dikirim sebagian");
+
+  // An unknown code falls back to itself, so a status added to the contract is visible rather than
+  // silently blank.
+  assert.equal(shipmentStatusLabel("mystery"), "mystery");
+  assert.equal(shipmentArrangementLabel("mystery"), "mystery");
+  assert.equal(fulfillmentStatusLabel("mystery"), "mystery");
+});
+
+test("only an http(s) URL is rendered as a link, because tracking URLs come off-platform", () => {
+  assert.equal(safeLinkUrl("https://track.example.test/ABC"), "https://track.example.test/ABC");
+  assert.equal(safeLinkUrl("http://track.example.test/ABC"), "http://track.example.test/ABC");
+  // The dangerous schemes a courier or marketplace could put in a tracking URL.
+  assert.equal(safeLinkUrl("javascript:alert(1)"), null);
+  assert.equal(safeLinkUrl("data:text/html,<script>alert(1)</script>"), null);
+  assert.equal(safeLinkUrl("not a url"), null);
+  // An absent URL is absent, not a broken link.
+  assert.equal(safeLinkUrl(null), null);
 });

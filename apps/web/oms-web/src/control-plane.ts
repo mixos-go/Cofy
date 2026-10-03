@@ -15,6 +15,8 @@ export interface OrderSummary {
   readonly orderId: string;
   readonly displayId: number | null;
   readonly status: string;
+  /** Medusa's own fulfillment state, so the list shows delivery progress without a second read. */
+  readonly fulfillmentStatus: string | null;
   readonly channel: string | null;
   readonly externalOrderId: string | null;
   readonly email: string | null;
@@ -32,8 +34,37 @@ export interface OrderLine {
   readonly unitPrice: { readonly amount: number; readonly currency: string } | null;
 }
 
+/** One tracking event on a shipment, as the track pass recorded it (docs/adr/0021). */
+export interface ShipmentEvent {
+  readonly status: string;
+  readonly occurredAt: string;
+  readonly description: string;
+}
+
+/**
+ * A shipment on an order (docs/PLAN.md M7).
+ *
+ * The fulfillment *is* the shipment record, so this rides on the order detail rather than a route of
+ * its own. `arrangement` says who booked the waybill — the marketplace or one of our couriers — and
+ * `status` is the courier-neutral delivery status the track pass writes.
+ */
+export interface Shipment {
+  readonly fulfillmentId: string;
+  readonly trackingNumber: string | null;
+  readonly trackingUrl: string | null;
+  readonly labelUrl: string | null;
+  readonly courier: string | null;
+  readonly serviceLevel: string | null;
+  readonly arrangement: "channel" | "courier" | null;
+  readonly status: string;
+  readonly events: readonly ShipmentEvent[];
+  readonly shippedAt: string | null;
+  readonly deliveredAt: string | null;
+}
+
 export interface OrderDetail extends OrderSummary {
   readonly lines: readonly OrderLine[];
+  readonly shipments: readonly Shipment[];
 }
 
 export interface OrderPage {

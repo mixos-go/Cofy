@@ -12,7 +12,9 @@
  *   - re-recording the same waybill converges on the first fulfillment instead of fulfilling the
  *     order's items twice — the retry the worker will actually make;
  *   - the delivery-status pull path has its two ends: `/admin/shipments/active` returns the shipment
- *     (docs/adr/0021) and `.../status` advances it, idempotently on a repeat.
+ *     (docs/adr/0021) and `.../status` advances it, idempotently on a repeat;
+ *   - the seller read (ADR 0016) surfaces the recorded shipment off Medusa's own order route — the
+ *     waybill, the courier, the arrangement and the advanced status — which is how the OMS sees it.
  *
  * It reads the fulfillment's label and the reservation straight from the tenant schema, because the
  * assertion that matters is about the engine's rows, not about a response body. Skipped when
@@ -22,13 +24,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Pool } from "pg";
-import { PostgresTenantSchemaAdmin } from "@platform/control-plane";
+import { PostgresTenantSchemaAdmin, SellerOrderReader } from "@platform/control-plane";
+import { InMemorySyncStateStore } from "@platform/sync-state";
+import type { MedusaTargetStore } from "@platform/contracts";
+import type { MedusaAdminKeyStore } from "@platform/secrets";
 import {
   DATABASE_URL,
   SHIPMENT_SEED_SCRIPT,
   databaseUrlFor,
   runMedusa,
-  startServer
+  startServer,
+  silentLogger
 } from "./medusa-harness.ts";
 
 const TENANT_ID = "tnt-shipment-itest";
@@ -127,7 +133,6 @@ test(
 
     const call = adminFetch(port, secretKey);
     const waybill = { trackingNumber: "JNE-SHIP-0001", trackingUrl: "https://track.example.test/JNE-SHIP-0001" };
-
     // Live reservations, not the soft-deleted rows Medusa keeps: a consumed reservation is deleted,
     // so an assertion on `quantity > 0` would still pass if the row were merely emptied.
     const reservationCount = async (): Promise<number> => {
@@ -255,6 +260,58 @@ test(
       );
       assert.equal(rows[0]!.metadata.shipment_status, "in_transit");
       assert.equal(rows[0]!.metadata.shipment_events.length, 1, "the repeat must not duplicate the event");
+    });
+
+    await t.test("the seller read surfaces the shipment, with its waybill and advanced status", async () => {
+      // The seller sees the shipment through the same order read that serves the OMS (ADR 0016), so
+      // this is the end-to-end proof that the write path's record is reachable by the UI: the
+      // fulfillment we booked, its label, and the status the track pass advanced are all projected
+      // off Medusa's own order route with no extra tenant route.
+      const syncState = new InMemorySyncStateStore();
+      await syncState.reserveOrderRef({
+        tenantId: TENANT_ID,
+        channel: "shopee",
+        externalOrderId: "ext-ship",
+        now: new Date().toISOString()
+      });
+      await syncState.commitOrderRef(TENANT_ID, "shopee", "ext-ship", seed.orderId, new Date().toISOString());
+
+      const targets: MedusaTargetStore = {
+        async get(tenantId) {
+          return tenantId === TENANT_ID ? { tenantId: TENANT_ID, baseUrl: `http://127.0.0.1:${port}` } : null;
+        },
+        async set() {},
+        async delete() {}
+      };
+      const keys: MedusaAdminKeyStore = {
+        async get(tenantId) {
+          return tenantId === TENANT_ID ? secretKey : null;
+        },
+        async put() {},
+        async delete() {},
+        async listTenants() {
+          return [TENANT_ID];
+        }
+      };
+      const reader = new SellerOrderReader({ targets, keys, syncState, transport: fetch, logger: silentLogger });
+
+      const detail = await reader.getOrder({ tenantId: TENANT_ID, orderId: seed.orderId });
+      assert.equal(detail.channel, "shopee");
+      // Medusa's own fulfillment state must survive the projection, or the list shows no delivery
+      // progress at all.
+      assert.equal(detail.fulfillmentStatus, "shipped");
+      assert.equal(detail.shipments.length, 1);
+      const shipment = detail.shipments[0]!;
+      assert.equal(shipment.fulfillmentId, (first.body as { fulfillmentId: string }).fulfillmentId);
+      assert.equal(shipment.trackingNumber, waybill.trackingNumber);
+      assert.equal(shipment.trackingUrl, waybill.trackingUrl);
+      assert.equal(shipment.courier, "jne");
+      assert.equal(shipment.serviceLevel, "regular");
+      assert.equal(shipment.arrangement, "courier");
+      assert.equal(shipment.status, "in_transit");
+      assert.equal(shipment.events.length, 1);
+      assert.equal(shipment.events[0]?.description, "Departed");
+      assert.ok(shipment.shippedAt !== null, "the shipment must report when it was handed to the courier");
     });
   }
 );

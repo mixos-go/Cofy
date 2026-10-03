@@ -1,7 +1,14 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getOrder } from "@/control-plane";
-import { formatMoney, formatTimestamp } from "@/format";
+import {
+  formatMoney,
+  formatTimestamp,
+  fulfillmentStatusLabel,
+  safeLinkUrl,
+  shipmentArrangementLabel,
+  shipmentStatusLabel
+} from "@/format";
 import { requireSessionToken } from "@/require-session";
 import { Shell } from "@/ui/shell";
 
@@ -43,6 +50,12 @@ export default async function OrderDetailPage({
         <dd>{order.externalOrderId ?? "—"}</dd>
         <dt>Status</dt>
         <dd>{order.status}</dd>
+        <dt>Status pengiriman</dt>
+        <dd>
+          {order.fulfillmentStatus === null
+            ? <span className="muted">Belum ada</span>
+            : fulfillmentStatusLabel(order.fulfillmentStatus)}
+        </dd>
         <dt>Pembeli</dt>
         <dd>{order.email ?? "—"}</dd>
         <dt>Total</dt>
@@ -76,6 +89,81 @@ export default async function OrderDetailPage({
             ))}
           </tbody>
         </table>
+      )}
+      <h2>Pengiriman</h2>
+      {order.shipments.length === 0 ? (
+        <p className="empty">Belum ada pengiriman untuk pesanan ini.</p>
+      ) : (
+        order.shipments.map((shipment) => {
+          const trackingUrl = safeLinkUrl(shipment.trackingUrl);
+          const labelUrl = safeLinkUrl(shipment.labelUrl);
+          return (
+            <section key={shipment.fulfillmentId} className="panel">
+              <dl className="definition">
+                <dt>Status</dt>
+                <dd>{shipmentStatusLabel(shipment.status)}</dd>
+                <dt>Kurir</dt>
+                <dd>{shipment.courier ?? "—"}</dd>
+                <dt>Layanan</dt>
+                <dd>{shipment.serviceLevel ?? "—"}</dd>
+                <dt>Pemesanan</dt>
+                <dd>
+                  {shipment.arrangement === null
+                    ? <span className="muted">—</span>
+                    : shipmentArrangementLabel(shipment.arrangement)}
+                </dd>
+                <dt>Nomor resi</dt>
+                <dd>
+                  {shipment.trackingNumber === null ? (
+                    <span className="muted">Belum ada</span>
+                  ) : trackingUrl === null ? (
+                    shipment.trackingNumber
+                  ) : (
+                    <a href={trackingUrl} target="_blank" rel="noreferrer noopener">
+                      {shipment.trackingNumber}
+                    </a>
+                  )}
+                </dd>
+                <dt>Label</dt>
+                <dd>
+                  {labelUrl === null ? (
+                    <span className="muted">—</span>
+                  ) : (
+                    <a href={labelUrl} target="_blank" rel="noreferrer noopener">
+                      Unduh label
+                    </a>
+                  )}
+                </dd>
+                <dt>Dikirim</dt>
+                <dd>{formatTimestamp(shipment.shippedAt ?? "")}</dd>
+                <dt>Terkirim</dt>
+                <dd>{formatTimestamp(shipment.deliveredAt ?? "")}</dd>
+              </dl>
+              {shipment.events.length === 0 ? (
+                <p className="muted">Belum ada riwayat pelacakan.</p>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Waktu</th>
+                      <th>Status</th>
+                      <th>Keterangan</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shipment.events.map((event, index) => (
+                      <tr key={`${event.occurredAt}-${index}`}>
+                        <td>{formatTimestamp(event.occurredAt)}</td>
+                        <td>{shipmentStatusLabel(event.status)}</td>
+                        <td>{event.description === "" ? "—" : event.description}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </section>
+          );
+        })
       )}
       <p>
         <Link href="/orders">Kembali ke daftar pesanan</Link>

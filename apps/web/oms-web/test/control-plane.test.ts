@@ -22,7 +22,9 @@ import {
   createWarehouse,
   disconnectChannel,
   getBinContents,
+  getOrder,
   listBins,
+  listOrders,
   listPickTasks,
   listPurchaseOrders,
   listStockMovements,
@@ -200,5 +202,17 @@ test("the warehouse client", async (t) => {
     const calls = stubFetch(t, { disconnected: true, channel: "shopee" });
     await disconnectChannel("tok", "shopee");
     assert.equal(calls.at(-1)?.url, `${BASE}/v1/seller/channels/shopee/disconnect`);
+  });
+
+  await t.test("the order reads address the seller routes, and a shipment rides on the detail", async () => {
+    const calls = stubFetch(t, { orders: [], total: 0 });
+
+    await listOrders("tok");
+    assert.equal(calls.at(-1)?.url, `${BASE}/v1/seller/orders?limit=20&offset=0`);
+    assert.equal(calls.at(-1)?.method, "GET");
+
+    // The order id is escaped, so a slash cannot address another route.
+    await getOrder("tok", "order/../order_9");
+    assert.equal(calls.at(-1)?.url, `${BASE}/v1/seller/orders/order%2F..%2Forder_9`);
   });
 });

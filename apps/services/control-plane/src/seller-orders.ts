@@ -14,6 +14,10 @@
  *    guess.
  * 2. **The response is an allowlist.** Medusa adding a field must not silently widen what a seller
  *    sees, so the projection below names every field it returns.
+ * 3. **Shipments ride on the order read.** The engine's fulfillment *is* the shipment record
+ *    (`recordShipmentWorkflow`), so `GET /admin/orders/:id?fields=*fulfillments,...` already carries
+ *    the waybill, the courier and the delivery status the track pass wrote. The order detail projects
+ *    them rather than calling a second route (docs/adr/0016, 0021).
  *
  * The credential is read per request and never stored, logged, or echoed. A missing key is
  * `TENANT_NOT_FOUND`; an unreachable instance is `UPSTREAM_ERROR`. A failure never degrades to an
@@ -42,6 +46,8 @@ export interface SellerOrderSummary {
   readonly orderId: string;
   readonly displayId: number | null;
   readonly status: string;
+  /** Medusa's own fulfillment state, so the list shows delivery progress without a second read. */
+  readonly fulfillmentStatus: string | null;
   readonly channel: ChannelCode | null;
   readonly externalOrderId: string | null;
   readonly email: string | null;
@@ -49,6 +55,38 @@ export interface SellerOrderSummary {
   readonly itemCount: number;
   readonly placedAt: string;
   readonly updatedAt: string;
+}
+
+/** One tracking event as the engine recorded it, normalised by the track pass (docs/adr/0021). */
+export interface SellerShipmentEvent {
+  readonly status: string;
+  readonly occurredAt: string;
+  readonly description: string;
+}
+
+/**
+ * A shipment as a seller sees it (docs/PLAN.md M7).
+ *
+ * The fulfillment *is* the shipment record (`recordShipmentWorkflow`), so this is a projection of
+ * the engine's own fulfillment plus the metadata and label we wrote on it — no new tenant route, the
+ * same proxy rule ADR 0016 set for orders. It carries the courier-neutral vocabulary the platform
+ * uses (`arrangement`, the normalised status) and the raw channel/courier names the seller sees.
+ */
+export interface SellerShipment {
+  readonly fulfillmentId: string;
+  readonly trackingNumber: string | null;
+  readonly trackingUrl: string | null;
+  readonly labelUrl: string | null;
+  /** Our `CourierCode` for a self-arranged shipment, or the channel's courier name otherwise. */
+  readonly courier: string | null;
+  readonly serviceLevel: string | null;
+  /** Who arranged the waybill, when the shipment carries our metadata. `null` otherwise. */
+  readonly arrangement: "channel" | "courier" | null;
+  /** The normalised delivery status (docs/adr/0021), or `created` when none was recorded yet. */
+  readonly status: string;
+  readonly events: readonly SellerShipmentEvent[];
+  readonly shippedAt: string | null;
+  readonly deliveredAt: string | null;
 }
 
 export interface SellerOrderList {
@@ -69,6 +107,8 @@ export interface SellerOrderLine {
 
 export interface SellerOrderDetail extends SellerOrderSummary {
   readonly lines: readonly SellerOrderLine[];
+  /** The order's shipments, as the engine recorded them (docs/PLAN.md M7). */
+  readonly shipments: readonly SellerShipment[];
   readonly subtotal: Money | null;
   readonly shipping: Money | null;
   readonly discount: Money | null;
@@ -97,6 +137,71 @@ function optionalMoney(value: unknown): Money | null {
   return typeof value === "number" && Number.isFinite(value) ? senFromMedusaRupiah(value) : null;
 }
 
+/** An optional ISO timestamp as a string, keeping an absent one absent rather than inventing a date. */
+function optionalTimestamp(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/** An optional non-empty string, so an empty tracking/label URL reads as absent, not as "". */
+function optionalString(value: unknown): string | null {
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/** The normalised tracking events the track pass wrote, ignoring anything malformed rather than guessing. */
+function shipmentEvents(metadata: Record<string, unknown>): readonly SellerShipmentEvent[] {
+  const raw = metadata.shipment_events;
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry): SellerShipmentEvent[] => {
+    if (entry === null || typeof entry !== "object") return [];
+    const event = entry as Record<string, unknown>;
+    if (typeof event.status !== "string" || typeof event.occurredAt !== "string") return [];
+    return [
+      {
+        status: event.status,
+        occurredAt: event.occurredAt,
+        description: typeof event.description === "string" ? event.description : ""
+      }
+    ];
+  });
+}
+
+/**
+ * Project one engine fulfillment into the shipment a seller sees (docs/PLAN.md M7).
+ *
+ * The fulfillment is the shipment record: our `recordShipmentWorkflow` writes the courier, the
+ * arrangement and the delivery status into its `metadata`, and the waybill into its label. This
+ * reads those back with the same allowlist discipline the order projection uses (ADR 0016 point 5),
+ * so a field we did not write cannot reach a seller by default. A fulfillment with no label — one
+ * the engine created by some other path — still projects, with `trackingNumber: null`, rather than
+ * being dropped, because the seller should see that the order shipped.
+ */
+function projectShipment(fulfillment: MedusaFulfillment): SellerShipment | null {
+  const fulfillmentId = typeof fulfillment.id === "string" ? fulfillment.id : null;
+  if (fulfillmentId === null) return null;
+
+  const metadata = (fulfillment.metadata ?? {}) as Record<string, unknown>;
+  const label = (fulfillment.labels ?? [])[0];
+  const arrangement = metadata.arrangement === "channel" || metadata.arrangement === "courier"
+    ? metadata.arrangement
+    : null;
+
+  return {
+    fulfillmentId,
+    trackingNumber: optionalString(label?.tracking_number),
+    trackingUrl: optionalString(label?.tracking_url),
+    labelUrl: optionalString(label?.label_url),
+    courier: optionalString(metadata.courier),
+    serviceLevel: optionalString(metadata.service_level),
+    arrangement,
+    // A shipment with no recorded status has not had a track pass yet; `created` is what the engine
+    // stamps at booking time, so reporting it is honest rather than inventing "unknown".
+    status: typeof metadata.shipment_status === "string" ? metadata.shipment_status : "created",
+    events: shipmentEvents(metadata),
+    shippedAt: optionalTimestamp(fulfillment.shipped_at),
+    deliveredAt: optionalTimestamp(fulfillment.delivered_at)
+  };
+}
+
 interface MedusaOrderItem {
   readonly title?: unknown;
   readonly variant_sku?: unknown;
@@ -105,10 +210,25 @@ interface MedusaOrderItem {
   readonly subtotal?: unknown;
 }
 
+interface MedusaFulfillmentLabel {
+  readonly tracking_number?: unknown;
+  readonly tracking_url?: unknown;
+  readonly label_url?: unknown;
+}
+
+interface MedusaFulfillment {
+  readonly id?: unknown;
+  readonly metadata?: unknown;
+  readonly shipped_at?: unknown;
+  readonly delivered_at?: unknown;
+  readonly labels?: readonly MedusaFulfillmentLabel[];
+}
+
 interface MedusaOrder {
   readonly id?: unknown;
   readonly display_id?: unknown;
   readonly status?: unknown;
+  readonly fulfillment_status?: unknown;
   readonly email?: unknown;
   readonly total?: unknown;
   readonly subtotal?: unknown;
@@ -117,15 +237,31 @@ interface MedusaOrder {
   readonly created_at?: unknown;
   readonly updated_at?: unknown;
   readonly items?: readonly MedusaOrderItem[];
+  readonly fulfillments?: readonly MedusaFulfillment[];
 }
 
 /** The fields the proxy asks Medusa for. Both lists are spelled out so the request is reviewable. */
-const LIST_FIELDS = ["id", "display_id", "status", "email", "total", "created_at", "updated_at", "*items"];
+const LIST_FIELDS = [
+  "id",
+  "display_id",
+  "status",
+  "fulfillment_status",
+  "email",
+  "total",
+  "created_at",
+  "updated_at",
+  "*items"
+];
 const DETAIL_FIELDS = [
   ...LIST_FIELDS,
   "subtotal",
   "shipping_total",
-  "discount_total"
+  "discount_total",
+  // The fulfillment *is* the shipment record, so the order read carries it: no second route, and the
+  // seller sees tracking and delivery status on the order they belong to (docs/adr/0016, 0021).
+  "*fulfillments",
+  "*fulfillments.labels",
+  "*fulfillments.metadata"
 ];
 
 export class SellerOrderReader {
@@ -244,6 +380,7 @@ export class SellerOrderReader {
       orderId,
       displayId: typeof order.display_id === "number" ? order.display_id : null,
       status: typeof order.status === "string" ? order.status : "unknown",
+      fulfillmentStatus: typeof order.fulfillment_status === "string" ? order.fulfillment_status : null,
       channel: ref?.channel ?? null,
       externalOrderId: ref?.externalOrderId ?? null,
       email: typeof order.email === "string" ? order.email : null,
@@ -324,9 +461,16 @@ export class SellerOrderReader {
       subtotal: optionalMoney(item.subtotal)
     }));
 
+    // The order read carries the fulfillments because the fulfillment is the shipment record; a
+    // fulfillment with no id is skipped rather than projected into an unaddressable shipment.
+    const shipments = (order.fulfillments ?? [])
+      .map((fulfillment) => projectShipment(fulfillment))
+      .filter((shipment): shipment is SellerShipment => shipment !== null);
+
     return {
       ...summary,
       lines,
+      shipments,
       subtotal: optionalMoney(order.subtotal),
       shipping: optionalMoney(order.shipping_total),
       discount: optionalMoney(order.discount_total)

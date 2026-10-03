@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { listOrders } from "@/control-plane";
-import { formatMoney, formatTimestamp } from "@/format";
+import { formatMoney, formatTimestamp, fulfillmentStatusLabel } from "@/format";
 import { requireSessionToken } from "@/require-session";
 import { Shell } from "@/ui/shell";
 
@@ -37,6 +37,7 @@ export default async function OrdersPage() {
               <th>Nomor</th>
               <th>Kanal</th>
               <th>Status</th>
+              <th>Pengiriman</th>
               <th>Pembeli</th>
               <th className="numeric">Item</th>
               <th className="numeric">Total</th>
@@ -59,6 +60,11 @@ export default async function OrdersPage() {
                   )}
                 </td>
                 <td>{order.status}</td>
+                <td>
+                  {order.fulfillmentStatus === null
+                    ? <span className="muted">—</span>
+                    : fulfillmentStatusLabel(order.fulfillmentStatus)}
+                </td>
                 <td>{order.email ?? "—"}</td>
                 <td className="numeric">{order.itemCount}</td>
                 <td className="numeric">{formatMoney(order.total)}</td>

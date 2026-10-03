@@ -582,6 +582,149 @@ test("the API", async (t) => {
     assert.deepEqual(body.lines[0]?.unitPrice, { amount: 2_000_000, currency: "IDR" });
   });
 
+  await t.test("the order detail carries its shipments, projected from the engine's fulfillments", async () => {
+    const seen: { url: string }[] = [];
+    harness.setSellerTransport(async (url) => {
+      seen.push({ url });
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            order: {
+              id: "order_9",
+              display_id: 12,
+              status: "pending",
+              fulfillment_status: "shipped",
+              total: 48_000,
+              subtotal: 40_000,
+              shipping_total: 5_000,
+              discount_total: 0,
+              created_at: NOW,
+              updated_at: NOW,
+              items: [{ title: "Kaos", variant_sku: "SKU-1", quantity: 2, unit_price: 20_000, subtotal: 40_000 }],
+              fulfillments: [
+                {
+                  id: "ful_1",
+                  shipped_at: NOW,
+                  delivered_at: null,
+                  metadata: {
+                    courier: "jne",
+                    service_level: "regular",
+                    arrangement: "channel",
+                    channel: "shopee",
+                    external_order_id: "ext-9",
+                    shipment_status: "in_transit",
+                    shipment_events: [
+                      { status: "in_transit", occurredAt: NOW, description: "Departed" }
+                    ]
+                  },
+                  labels: [
+                    { tracking_number: "JNE-1", tracking_url: "https://track.example.test/JNE-1", label_url: "" }
+                  ]
+                }
+              ]
+            }
+          })
+      };
+    });
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders/order_9`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      fulfillmentStatus: string | null;
+      shipments: {
+        fulfillmentId: string;
+        trackingNumber: string | null;
+        trackingUrl: string | null;
+        labelUrl: string | null;
+        courier: string | null;
+        serviceLevel: string | null;
+        arrangement: string | null;
+        status: string;
+        events: { status: string; occurredAt: string; description: string }[];
+        shippedAt: string | null;
+        deliveredAt: string | null;
+      }[];
+    };
+
+    assert.equal(body.fulfillmentStatus, "shipped");
+    assert.equal(body.shipments.length, 1);
+    const shipment = body.shipments[0]!;
+    assert.equal(shipment.fulfillmentId, "ful_1");
+    assert.equal(shipment.trackingNumber, "JNE-1");
+    assert.equal(shipment.trackingUrl, "https://track.example.test/JNE-1");
+    // An empty label URL reads as absent, not as an empty string a link would render as broken.
+    assert.equal(shipment.labelUrl, null);
+    assert.equal(shipment.courier, "jne");
+    assert.equal(shipment.serviceLevel, "regular");
+    assert.equal(shipment.arrangement, "channel");
+    assert.equal(shipment.status, "in_transit");
+    assert.equal(shipment.events.length, 1);
+    assert.equal(shipment.events[0]?.description, "Departed");
+    assert.equal(shipment.shippedAt, NOW);
+    assert.equal(shipment.deliveredAt, null);
+    // The shipment rides on the order read: the proxy asks for the fulfillments it needs, rather
+    // than issuing a second request (docs/adr/0016).
+    assert.ok(
+      seen[0]?.url.includes("*fulfillments"),
+      "the order detail must ask Medusa for the fulfillments"
+    );
+  });
+
+  await t.test("a shipment with no metadata or label still projects, and malformed events are dropped", async () => {
+    harness.setSellerTransport(async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          order: {
+            id: "order_9",
+            status: "pending",
+            created_at: NOW,
+            updated_at: NOW,
+            items: [],
+            fulfillments: [
+              // A fulfillment the engine created by some other path: no metadata, no label. It must
+              // still appear so the seller sees the order shipped, with an honest `created` status.
+              { id: "ful_bare", shipped_at: NOW, metadata: null, labels: [] },
+              // Malformed metadata: an arrangement we never write and events missing a status.
+              {
+                id: "ful_bad",
+                metadata: { arrangement: "telepathy", shipment_events: [{ occurredAt: NOW }, "nonsense"] },
+                labels: []
+              },
+              // No id: unaddressable, so it must be dropped rather than projected.
+              { metadata: {} }
+            ]
+          }
+        })
+    }));
+
+    const response = await fetch(`${harness.baseUrl}/v1/seller/orders/order_9`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      shipments: { fulfillmentId: string; status: string; arrangement: string | null; events: unknown[]; trackingNumber: string | null }[];
+    };
+
+    assert.equal(body.shipments.length, 2);
+    const bare = body.shipments.find((s) => s.fulfillmentId === "ful_bare")!;
+    assert.equal(bare.status, "created");
+    assert.equal(bare.arrangement, null);
+    assert.equal(bare.trackingNumber, null);
+    assert.deepEqual(bare.events, []);
+
+    const bad = body.shipments.find((s) => s.fulfillmentId === "ful_bad")!;
+    // An arrangement we do not recognise is reported as absent, not echoed back as a value the UI
+    // would have to interpret.
+    assert.equal(bad.arrangement, null);
+    assert.deepEqual(bad.events, []);
+  });
+
   await t.test("an order Medusa does not have is 404, and a broken engine is not an empty list", async () => {
     harness.setSellerTransport(async () => ({ ok: false, status: 404, text: async () => "" }));
     const missing = await fetch(`${harness.baseUrl}/v1/seller/orders/order_nope`, {

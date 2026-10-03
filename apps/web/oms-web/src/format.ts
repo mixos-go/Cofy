@@ -141,3 +141,70 @@ export function formatVariance(variance: number | null): string {
   if (variance === 0) return "Sesuai";
   return variance > 0 ? `Lebih ${variance}` : `Kurang ${Math.abs(variance)}`;
 }
+
+/**
+ * Delivery statuses as a seller knows them (docs/PLAN.md M7).
+ *
+ * The API speaks the courier-neutral `ShipmentStatus` vocabulary; a screen speaks Indonesian. One
+ * table, so no page invents its own word and drifts — the same rule the channel and warehouse
+ * labels follow. An unknown status falls through unchanged rather than being hidden, so a status
+ * added to the contract shows up instead of silently reading as blank.
+ */
+const SHIPMENT_STATUS_LABELS: Readonly<Record<string, string>> = {
+  created: "Dibuat",
+  picked_up: "Dijemput kurir",
+  in_transit: "Dalam perjalanan",
+  out_for_delivery: "Sedang diantar",
+  delivered: "Terkirim",
+  failed: "Gagal kirim",
+  returned: "Dikembalikan",
+  cancelled: "Dibatalkan"
+};
+
+export function shipmentStatusLabel(status: string): string {
+  return SHIPMENT_STATUS_LABELS[status] ?? status;
+}
+
+const SHIPMENT_ARRANGEMENT_LABELS: Readonly<Record<string, string>> = {
+  channel: "Dipesan kanal",
+  courier: "Dipesan kurir kami"
+};
+
+export function shipmentArrangementLabel(arrangement: string): string {
+  return SHIPMENT_ARRANGEMENT_LABELS[arrangement] ?? arrangement;
+}
+
+/** Medusa's own fulfillment state, for the order list and detail. */
+const FULFILLMENT_STATUS_LABELS: Readonly<Record<string, string>> = {
+  not_fulfilled: "Belum diproses",
+  partially_fulfilled: "Diproses sebagian",
+  fulfilled: "Sudah diproses",
+  partially_shipped: "Dikirim sebagian",
+  shipped: "Dikirim",
+  partially_delivered: "Terkirim sebagian",
+  delivered: "Terkirim",
+  canceled: "Dibatalkan"
+};
+
+export function fulfillmentStatusLabel(status: string): string {
+  return FULFILLMENT_STATUS_LABELS[status] ?? status;
+}
+
+/**
+ * A tracking or label URL, or null when it is not a safe `http(s)` link.
+ *
+ * A tracking URL comes from a marketplace or courier and is rendered as a link, so it is the one
+ * place an attacker-controlled string could become a `javascript:` or `data:` navigation. The API
+ * is the platform's own projection, but the value still originates off-platform, so the guard is at
+ * the display boundary rather than trusted (AGENTS.md §5). A value that fails the check is shown as
+ * absent rather than as a link that goes somewhere unexpected.
+ */
+export function safeLinkUrl(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
+}
