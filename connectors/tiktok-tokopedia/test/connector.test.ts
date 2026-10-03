@@ -369,7 +369,7 @@ test("a business error code becomes a non-retryable upstream error", async () =>
   );
 });
 
-test("capabilities advertise the implemented listing read and stock push", () => {
+test("capabilities advertise the implemented listing read, stock push and shipping arrangement", () => {
   const connector = new TikTokConnector(makeConfig(transport([{}]).fetch));
 
   assert.deepEqual(connector.capabilities(), {
@@ -380,7 +380,10 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     splitsOrderHistory: true,
     supportsListingRead: true,
     supportsStockSnapshotRead: true,
-    supportsTrackingWriteBack: true
+    supportsTrackingWriteBack: true,
+    supportsShippingArrangement: true,
+    supportsShippingLabel: true,
+    supportsChannelTracking: true
   });
 });
 
@@ -407,6 +410,134 @@ test("attachTrackingNumber surfaces a business error code instead of reading a 2
   await assert.rejects(
     connector.attachTrackingNumber("order-1", { trackingNumber: "JX1", trackingUrl: null }, credential),
     (error: unknown) => error instanceof PlatformError && error.code === "UPSTREAM_ERROR"
+  );
+});
+
+test("getShippingArrangementParameters lists the eligible couriers with neutral service levels", async () => {
+  const t = transport([
+    {
+      code: 0,
+      data: {
+        shipping_services: [
+          {
+            id: "svc-standard",
+            name: "Standard",
+            shipping_provider_name: "J&T Express",
+            shipping_type: "STANDARD",
+            price: "15000.00",
+            earliest_delivery_days: 1,
+            latest_delivery_days: 3
+          },
+          {
+            id: "svc-express",
+            name: "Express",
+            shipping_provider_name: "SiCepat",
+            shipping_type: "EXPRESS",
+            price: "25000.00",
+            earliest_delivery_days: 1,
+            latest_delivery_days: 1
+          },
+          { name: "no id, skipped" }
+        ]
+      }
+    }
+  ]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const parameters = await connector.getShippingArrangementParameters("576461413038785752", credential);
+
+  assert.match(t.urls[0] ?? "", /\/fulfillment\/202309\/orders\/576461413038785752\/shipping_services\/query/);
+  assert.equal(parameters.options.length, 2);
+  assert.deepEqual(parameters.options[0], {
+    channelOptionId: "svc-standard",
+    courier: "J&T Express",
+    serviceLevel: "regular",
+    price: { amount: 1_500_000, currency: "IDR" },
+    estimatedDays: { min: 1, max: 3 }
+  });
+  assert.equal(parameters.options[1]?.serviceLevel, "express");
+});
+
+test("arrangeShipment records a self-arranged waybill with markPackageAsShipped", async () => {
+  const t = transport([{ code: 0, data: {} }]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const shipment = await connector.arrangeShipment(
+    {
+      externalOrderId: "576461413038785752",
+      channelOptionId: null,
+      pickupAddressId: null,
+      selfShipTrackingNumber: "JX-SELLER-1"
+    },
+    credential
+  );
+
+  assert.equal(t.urls.length, 1);
+  assert.match(t.urls[0] ?? "", /\/fulfillment\/202309\/orders\/576461413038785752\/packages/);
+  assert.equal(shipment.trackingNumber, "JX-SELLER-1");
+});
+
+test("arrangeShipment creates a package, ships it, then reads the waybill", async () => {
+  const t = transport([
+    { code: 0, data: { package_id: "pkg-1" } }, // createPackages
+    { code: 0, data: { tracking_number: "JT-CHANNEL-1" } }, // shipPackage
+  ]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const shipment = await connector.arrangeShipment(
+    {
+      externalOrderId: "576461413038785752",
+      channelOptionId: "svc-standard",
+      pickupAddressId: null,
+      selfShipTrackingNumber: null
+    },
+    credential
+  );
+
+  assert.match(t.urls[0] ?? "", /\/fulfillment\/202512\/packages/);
+  assert.match(t.urls[1] ?? "", /\/fulfillment\/202309\/packages\/pkg-1\/ship/);
+  assert.equal(shipment.trackingNumber, "JT-CHANNEL-1");
+});
+
+test("fetchShippingLabel resolves the package, then returns the document URL", async () => {
+  const t = transport([
+    {
+      code: 0,
+      data: { orders: [{ id: "576461413038785752", line_items: [{ id: "li-1", package_id: "pkg-1" }] }] }
+    },
+    { code: 0, data: { doc_url: "https://label.example.test/pkg-1.pdf", tracking_number: "JT-CHANNEL-1" } }
+  ]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const label = await connector.fetchShippingLabel("576461413038785752", credential);
+
+  assert.match(t.urls[0] ?? "", /\/order\/202507\/orders/);
+  assert.match(t.urls[1] ?? "", /\/fulfillment\/202309\/packages\/pkg-1\/shipping_documents/);
+  // TikTok returns a URL, not the bytes; that is the opposite of Shopee.
+  assert.equal(label.url, "https://label.example.test/pkg-1.pdf");
+  assert.equal(label.inlineBase64, null);
+});
+
+test("fetchChannelTracking normalises TikTok statuses into neutral events", async () => {
+  const t = transport([
+    {
+      code: 0,
+      data: {
+        tracking: [
+          { status: "SHIPPED", update_time: 1608271872, description: "Handed to courier" },
+          { status: "DELIVERED", update_time: 1608275000, description: "Delivered" }
+        ]
+      }
+    }
+  ]);
+  const connector = new TikTokConnector(makeConfig(t.fetch));
+
+  const page = await connector.fetchChannelTracking("576461413038785752", credential);
+
+  assert.match(t.urls[0] ?? "", /\/fulfillment\/202309\/orders\/576461413038785752\/tracking/);
+  assert.deepEqual(
+    page.events.map((event) => event.status),
+    ["in_transit", "delivered"]
   );
 });
 

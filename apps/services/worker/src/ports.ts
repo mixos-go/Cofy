@@ -16,11 +16,13 @@ import { PlatformError, isRetryable } from "@platform/contracts";
 import type { Transport } from "@platform/http-transport";
 import type { MedusaAdminKeyStore } from "@platform/secrets";
 import type {
+  ArrangedShipment,
   ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
   ChannelStockLevel,
+  ChannelTrackingPage,
   CourierCode,
   IdempotencyClaim,
   OrderId,
@@ -28,6 +30,9 @@ import type {
   Shipment,
   ShipmentQuote,
   ShipmentRequest,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel,
   StockResult,
   StockUpdate,
   SyncEntity,
@@ -182,6 +187,44 @@ export interface ChannelGateway {
     readonly externalOrderId: string;
     readonly tracking: TrackingWriteBack;
   }): Promise<void>;
+
+  /**
+   * The channel's shipping-arrangement options for an order (docs/adr/0021), gated by
+   * `supportsShippingArrangement`. This is the primary fulfillment path for Shopee and TikTok
+   * Shop/Tokopedia, where the marketplace owns the courier.
+   */
+  getShippingArrangementParameters(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ShippingArrangementParameters>;
+
+  /**
+   * Have the channel book the shipment, or record the seller's own waybill (docs/adr/0021). Gated by
+   * `supportsShippingArrangement`; returns the waybill the channel issued plus its shipping status.
+   */
+  arrangeShipment(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly arrangement: ShippingArrangementRequest;
+  }): Promise<ArrangedShipment>;
+
+  /** The printable label for a shipment the channel arranged (docs/adr/0021). */
+  fetchShippingLabel(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ShippingLabel>;
+
+  /**
+   * The channel's tracking events for an order it arranged (docs/adr/0021), the source of the
+   * delivery-status pull path for a channel-arranged shipment.
+   */
+  fetchChannelTracking(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ChannelTrackingPage>;
 }
 
 /**
@@ -608,6 +651,57 @@ export class HttpChannelGateway implements ChannelGateway {
       trackingNumber: input.tracking.trackingNumber,
       trackingUrl: input.tracking.trackingUrl
     });
+  }
+
+  async getShippingArrangementParameters(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }) {
+    const body = (await this.#post(`/v1/channels/${input.channel}/shipping-arrangement`, {
+      tenantId: input.tenantId,
+      externalOrderId: input.externalOrderId
+    })) as { readonly parameters: ShippingArrangementParameters };
+    return body.parameters;
+  }
+
+  async arrangeShipment(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly arrangement: ShippingArrangementRequest;
+  }) {
+    const body = (await this.#post(`/v1/channels/${input.channel}/shipping-arrangement/arrange`, {
+      tenantId: input.tenantId,
+      externalOrderId: input.arrangement.externalOrderId,
+      channelOptionId: input.arrangement.channelOptionId,
+      pickupAddressId: input.arrangement.pickupAddressId,
+      selfShipTrackingNumber: input.arrangement.selfShipTrackingNumber
+    })) as { readonly shipment: ArrangedShipment };
+    return body.shipment;
+  }
+
+  async fetchShippingLabel(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }) {
+    const body = (await this.#post(`/v1/channels/${input.channel}/shipping-label`, {
+      tenantId: input.tenantId,
+      externalOrderId: input.externalOrderId
+    })) as { readonly label: ShippingLabel };
+    return body.label;
+  }
+
+  async fetchChannelTracking(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }) {
+    const body = (await this.#post(`/v1/channels/${input.channel}/channel-tracking`, {
+      tenantId: input.tenantId,
+      externalOrderId: input.externalOrderId
+    })) as { readonly tracking: ChannelTrackingPage };
+    return body.tracking;
   }
 }
 

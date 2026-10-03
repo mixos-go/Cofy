@@ -144,6 +144,18 @@ class StubConnector implements ChannelConnector {
   async attachTrackingNumber(): Promise<never> {
     throw new Error("not used");
   }
+  async getShippingArrangementParameters(): Promise<never> {
+    throw new Error("not used");
+  }
+  async arrangeShipment(): Promise<never> {
+    throw new Error("not used");
+  }
+  async fetchShippingLabel(): Promise<never> {
+    throw new Error("not used");
+  }
+  async fetchChannelTracking(): Promise<never> {
+    throw new Error("not used");
+  }
   webhookHandlers(): Readonly<Record<string, never>> {
     return {};
   }
@@ -156,7 +168,10 @@ class StubConnector implements ChannelConnector {
       splitsOrderHistory: true,
       supportsListingRead: true,
       supportsStockSnapshotRead: false,
-      supportsTrackingWriteBack: false
+      supportsTrackingWriteBack: false,
+      supportsShippingArrangement: false,
+      supportsShippingLabel: false,
+      supportsChannelTracking: false
     };
   }
 }

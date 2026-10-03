@@ -10,16 +10,22 @@
 
 import type { InMemorySyncStateStore } from "@platform/sync-state";
 import type {
+  ArrangedShipment,
   ChannelCapabilities,
   ChannelCode,
   ChannelListing,
   ChannelOrder,
+  ChannelShippingOption,
   ChannelStockLevel,
+  ChannelTrackingPage,
   CourierCode,
   RateShoppingRules,
   Shipment,
   ShipmentQuote,
   ShipmentRequest,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel,
   StockResult,
   StockUpdate,
   TenantId,
@@ -122,7 +128,10 @@ export class FakeChannelGateway implements ChannelGateway {
     splitsOrderHistory: false,
     supportsListingRead: true,
     supportsStockSnapshotRead: true,
-    supportsTrackingWriteBack: true
+    supportsTrackingWriteBack: true,
+    supportsShippingArrangement: true,
+    supportsShippingLabel: true,
+    supportsChannelTracking: true
   });
 
   async capabilities(input: { readonly channel: ChannelCode }): Promise<ChannelCapabilities> {
@@ -212,6 +221,83 @@ export class FakeChannelGateway implements ChannelGateway {
       throw error;
     }
     this.trackingWrites.push(input);
+  }
+
+  /** Every arrangement read/booking/read attempted, so a test can prove what the channel was asked. */
+  readonly arrangementParameterCalls: {
+    tenantId: TenantId;
+    channel: ChannelCode;
+    externalOrderId: string;
+  }[] = [];
+  readonly arrangeCalls: {
+    tenantId: TenantId;
+    channel: ChannelCode;
+    arrangement: ShippingArrangementRequest;
+  }[] = [];
+  readonly labelCalls: { tenantId: TenantId; channel: ChannelCode; externalOrderId: string }[] = [];
+  readonly channelTrackingCalls: { tenantId: TenantId; channel: ChannelCode; externalOrderId: string }[] = [];
+  /** The options an arrangement read reports. Empty is the honest "no choice for this order". */
+  arrangementOptions: readonly ChannelShippingOption[] = [];
+  /** When set, the next arrangement call throws this — e.g. the governor refusing the call. */
+  arrangementError: Error | null = null;
+  channelTrackingEvents: readonly TrackingEvent[] = [];
+
+  async getShippingArrangementParameters(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ShippingArrangementParameters> {
+    this.arrangementParameterCalls.push(input);
+    return {
+      externalOrderId: input.externalOrderId,
+      options: this.arrangementOptions,
+      requiresPickup: false,
+      requiresDropoff: false,
+      pickupAddressIds: []
+    };
+  }
+
+  async arrangeShipment(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly arrangement: ShippingArrangementRequest;
+  }): Promise<ArrangedShipment> {
+    if (this.arrangementError !== null) {
+      const error = this.arrangementError;
+      this.arrangementError = null;
+      throw error;
+    }
+    this.arrangeCalls.push(input);
+    return {
+      externalOrderId: input.arrangement.externalOrderId,
+      trackingNumber: input.arrangement.selfShipTrackingNumber ?? "CHANNEL-ARRANGED-0001",
+      status: "created",
+      arrangedAt: new Date().toISOString()
+    };
+  }
+
+  async fetchShippingLabel(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ShippingLabel> {
+    this.labelCalls.push(input);
+    return {
+      externalOrderId: input.externalOrderId,
+      url: "https://label.example.test/label.pdf",
+      inlineBase64: null,
+      format: "pdf",
+      documentType: "SHIPPING_LABEL"
+    };
+  }
+
+  async fetchChannelTracking(input: {
+    readonly tenantId: TenantId;
+    readonly channel: ChannelCode;
+    readonly externalOrderId: string;
+  }): Promise<ChannelTrackingPage> {
+    this.channelTrackingCalls.push(input);
+    return { externalOrderId: input.externalOrderId, events: this.channelTrackingEvents };
   }
 }
 

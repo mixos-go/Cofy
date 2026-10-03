@@ -15,17 +15,24 @@
 
 import { PlatformError } from "@platform/contracts";
 import type {
+  ArrangedShipment,
   ChannelListing,
   ChannelListingVariant,
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
   ChannelStockLevel,
+  ChannelTrackingPage,
   Cursor,
   Instant,
   Page,
+  ShipmentStatus,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel,
   StockResult,
   StockUpdate,
+  TrackingEvent,
   TrackingWriteBack
 } from "@platform/contracts";
 import type {
@@ -50,13 +57,56 @@ import { shopeeListingStatus } from "./listing-schema.ts";
 import { assertIdr, epochSecondsToInstant, rupiahToMinor } from "./money.ts";
 import { Shopee, asResponseBody, verifyPushSignature } from "./vendor/shopee-sdk.ts";
 import type {
+  CreateShippingDocumentResponse,
+  DownloadShippingDocumentResponse,
   GetAccessTokenResponse,
   GetOrderDetailResponse,
   GetOrderListResponse,
-  RefreshAccessTokenResponse
+  GetShippingParameterResponse,
+  GetTrackingInfoResponse,
+  GetTrackingNumberResponse,
+  RefreshAccessTokenResponse,
+  ShipOrderResponse
 } from "./vendor/shopee-sdk.ts";
 
 type ShopeeOrderDetail = NonNullable<NonNullable<GetOrderDetailResponse["response"]>["order_list"]>[number];
+
+/**
+ * Map Shopee's `logistics_status` onto our neutral `ShipmentStatus` (docs/adr/0021).
+ *
+ * Shopee's vocabulary is not our vocabulary, and an unknown value must not become a guess: the
+ * mapping returns null and the caller skips it, so the pull path never invents a state the channel
+ * did not report. The values here are the documented `logistics_status` set; a value outside it is
+ * silently ignored rather than mislabelled.
+ */
+function shopeeTrackingStatus(raw: string | undefined): ShipmentStatus | null {
+  switch (raw) {
+    case "LOGISTICS_REQUEST_CREATED":
+    case "LOGISTICS_PICKUP_DONE":
+      return "picked_up";
+    case "LOGISTICS_PICKUP_RETRY":
+      return "picked_up";
+    case "LOGISTICS_DELIVERY_DONE":
+      return "delivered";
+    case "LOGISTICS_DELIVERY_FAILED":
+      return "failed";
+    case "LOGISTICS_REQUEST_CANCELED":
+      return "cancelled";
+    case "LOGISTICS_IN_TRANSIT":
+    case "LOGISTICS_PICKUP_ARRIVED":
+    case "LOGISTICS_DELIVERY_ARRIVED":
+      return "in_transit";
+    case "LOGISTICS_DELIVERY_OUT_FOR_DELIVERY":
+      return "out_for_delivery";
+    case "LOGISTICS_PICKUP_FAILED":
+      return "failed";
+    case "LOGISTICS_RETURNED":
+    case "LOGISTICS_RETURN_INITIATED":
+      return "returned";
+    default:
+      return null;
+  }
+}
 
 /** Cursor payload. Opaque to the caller; only this connector may interpret it (contract doc). */
 interface ShopeeCursor {
@@ -320,29 +370,218 @@ export class ShopeeConnector implements ChannelConnector {
   }
 
   /**
-   * Declared unsupported for now, and refuses loudly (docs/adr/0020).
+   * Write a waybill back to Shopee by booking the shipment (docs/adr/0020, corrected by ADR 0021).
    *
-   * Shopee's write-back is `ship_order`, but the correct request shape is channel-dependent: the
-   * waybill goes under `non_integrated.tracking_number` for a shop that arranges its own courier and
-   * under `pickup.tracking_number` for one Shopee integrates, and which one applies is decided by
-   * `get_shipping_parameter` (which returns `info_needed`) plus the shop's channel list. The vendored
-   * SDK's `ship_order` body spec lists only `["order_sn", "package_number", "pickup"]`, so the
-   * `non_integrated` path cannot even be expressed through it without a guess. Guessing here would
-   * either fail against a live shop or, worse, ship with the wrong address, so the capability stays
-   * `false` until the `get_shipping_parameter` flow and both shapes are implemented and verified
-   * against a live Development Shop. Recorded under M7 known limits in docs/PLAN.md.
+   * Shopee's `ship_order` is the write-back, and its shape is genuinely channel-dependent, which is
+   * why the caller must first read `getShippingArrangementParameters`: a shop that Arranges its own
+   * courier sends `pickup.tracking_number` (the waybill we hold), while a Shopee-arranged order sends
+   * the pickup address or nothing for a dropoff. `attachTrackingNumber` is the self-arranged half of
+   * that pair, so it always sends the waybill under `pickup.tracking_number`; the full arrangement
+   * path goes through `arrangeShipment`. Shopee answers an application error in a 200 body, so the
+   * response passes `assertNoErrorBody` before it is treated as accepted.
    */
   async attachTrackingNumber(
     externalOrderId: string,
     tracking: TrackingWriteBack,
     credential: Credential
   ): Promise<void> {
-    void credential;
-    void tracking;
-    throw new PlatformError(
-      "VALIDATION_FAILED",
-      `Shopee tracking write-back is not implemented yet (attempted for ${externalOrderId}); see capabilities().`
-    );
+    const client = this.clientFor(credential);
+    try {
+      const response = asResponseBody<ShipOrderResponse>(
+        await client.logistics.shipOrder({
+          order_sn: externalOrderId,
+          pickup: { tracking_number: tracking.trackingNumber }
+        })
+      );
+      assertNoErrorBody(response, "attachTrackingNumber/shipOrder");
+    } catch (error) {
+      throw toPlatformError(error, "attachTrackingNumber");
+    }
+  }
+
+  /**
+   * What Shopee needs to arrange this order's shipment (docs/adr/0021).
+   *
+   * `get_shipping_parameter` answers `info_needed`: a non-empty `pickup` means the caller must send a
+   * pickup address, a non-empty `dropoff` means a dropoff branch. Shopee fixes the logistics channel
+   * on the order itself before shipping, so there is no per-order courier choice to offer here and
+   * `options` is empty; the actionable output is which shape `arrangeShipment` must take and the
+   * pickup addresses the shop holds.
+   */
+  async getShippingArrangementParameters(
+    externalOrderId: string,
+    credential: Credential
+  ): Promise<ShippingArrangementParameters> {
+    const client = this.clientFor(credential);
+    try {
+      const response = asResponseBody<GetShippingParameterResponse>(
+        await client.logistics.getShippingParameter({ order_sn: externalOrderId })
+      );
+      assertNoErrorBody(response, "getShippingArrangementParameters/getShippingParameter");
+
+      const infoNeeded = response.response?.info_needed;
+      const pickup = infoNeeded?.pickup;
+      const dropoff = infoNeeded?.dropoff;
+      const addresses = response.response?.pickup?.address_list ?? [];
+
+      return {
+        externalOrderId,
+        options: [],
+        requiresPickup: Array.isArray(pickup) && pickup.length > 0,
+        requiresDropoff: Array.isArray(dropoff) && dropoff.length > 0,
+        pickupAddressIds: addresses
+          .map((address) => address.address_id)
+          .filter((id): id is number => typeof id === "number")
+          .map((id) => String(id))
+      };
+    } catch (error) {
+      throw toPlatformError(error, "getShippingArrangementParameters");
+    }
+  }
+
+  /**
+   * Have Shopee book the shipment (or record the seller's own waybill) and read the waybill it
+   * issues (docs/adr/0021).
+   *
+   * `ship_order` is the booking; `get_tracking_number` is how the marketplace-issued waybill is read
+   * back afterwards (Shopee issues it as part of shipping, not in the `ship_order` response). A
+   * self-arranged request sends the seller's own waybill under `pickup.tracking_number` and Shopee
+   * accepts it as-is; a channel-arranged request sends the pickup address when Shopee requires one.
+   */
+  async arrangeShipment(
+    request: ShippingArrangementRequest,
+    credential: Credential
+  ): Promise<ArrangedShipment> {
+    const client = this.clientFor(credential);
+    const externalOrderId = request.externalOrderId;
+    try {
+      const pickup =
+        request.selfShipTrackingNumber !== null
+          ? { tracking_number: request.selfShipTrackingNumber }
+          : request.pickupAddressId !== null
+            ? { address_id: Number(request.pickupAddressId) }
+            : undefined;
+
+      const shipResponse = asResponseBody<ShipOrderResponse>(
+        await client.logistics.shipOrder({
+          order_sn: externalOrderId,
+          ...(pickup === undefined ? {} : { pickup })
+        })
+      );
+      assertNoErrorBody(shipResponse, "arrangeShipment/shipOrder");
+
+      // The waybill: the seller's own when it was self-arranged, otherwise the marketplace's.
+      let trackingNumber = request.selfShipTrackingNumber;
+      if (trackingNumber === null) {
+        const tracking = asResponseBody<GetTrackingNumberResponse>(
+          await client.logistics.getTrackingNumber({ order_sn: externalOrderId })
+        );
+        assertNoErrorBody(tracking, "arrangeShipment/getTrackingNumber");
+        trackingNumber = tracking.response?.tracking_number ?? null;
+      }
+      if (trackingNumber === null || trackingNumber === "") {
+        throw new PlatformError(
+          "UPSTREAM_ERROR",
+          `Shopee accepted the shipment for ${externalOrderId} but returned no tracking number.`
+        );
+      }
+
+      return {
+        externalOrderId,
+        trackingNumber,
+        status: "created",
+        arrangedAt: new Date().toISOString()
+      };
+    } catch (error) {
+      throw toPlatformError(error, "arrangeShipment");
+    }
+  }
+
+  /**
+   * The printable label for a shipment Shopee arranged (docs/adr/0021).
+   *
+   * Shopee's label flow is create-then-download: `create_shipping_document` asks Shopee to produce
+   * the document for the order, then `download_shipping_document` returns it. Shopee returns the file
+   * inline (a base64 `waybill`), not a URL, so `url` is null and `inlineBase64` carries the bytes; the
+   * caller stores or streams them.
+   */
+  async fetchShippingLabel(externalOrderId: string, credential: Credential): Promise<ShippingLabel> {
+    const client = this.clientFor(credential);
+    const documentType = "NORMAL_AIR_WAYBILL";
+    try {
+      const created = asResponseBody<CreateShippingDocumentResponse>(
+        await client.logistics.createShippingDocument({
+          order_list: [{ order_sn: externalOrderId, shipping_document_type: documentType }]
+        })
+      );
+      assertNoErrorBody(created, "fetchShippingLabel/createShippingDocument");
+
+      const downloaded = asResponseBody<DownloadShippingDocumentResponse>(
+        await client.logistics.downloadShippingDocument({
+          shipping_document_type: documentType,
+          order_list: [{ order_sn: externalOrderId }]
+        })
+      );
+      // `DownloadShippingDocumentResponse` carries only `waybill` (no error envelope in the vendored
+      // spec), so there is nothing to assert here; an absent document is caught below.
+
+      const waybill = downloaded.waybill;
+      if (typeof waybill !== "string" || waybill === "") {
+        throw new PlatformError(
+          "UPSTREAM_ERROR",
+          `Shopee returned no shipping document for ${externalOrderId}.`
+        );
+      }
+      return {
+        externalOrderId,
+        url: null,
+        inlineBase64: waybill,
+        format: "pdf",
+        documentType
+      };
+    } catch (error) {
+      throw toPlatformError(error, "fetchShippingLabel");
+    }
+  }
+
+  /**
+   * Shopee's tracking events for an order it arranged (docs/adr/0021).
+   *
+   * `get_tracking_info` returns a `logistics_status` plus a list of events, each with its own
+   * `logistics_status`. Every status is mapped to our neutral `ShipmentStatus`; a status we do not
+   * recognise is skipped rather than guessed, so the pull path never invents a state the channel did
+   * not report.
+   */
+  async fetchChannelTracking(externalOrderId: string, credential: Credential): Promise<ChannelTrackingPage> {
+    const client = this.clientFor(credential);
+    try {
+      const response = asResponseBody<GetTrackingInfoResponse>(
+        await client.logistics.getTrackingInfo({ order_sn: externalOrderId })
+      );
+      assertNoErrorBody(response, "fetchChannelTracking/getTrackingInfo");
+
+      const events: TrackingEvent[] = [];
+      for (const entry of response.response?.tracking_info ?? []) {
+        const status = shopeeTrackingStatus(entry.logistics_status);
+        if (status === null) continue;
+        const occurredAt =
+          typeof entry.update_time === "number" ? epochSecondsToInstant(entry.update_time) : new Date().toISOString();
+        events.push({ status, occurredAt, description: entry.description ?? "" });
+      }
+      // The summary status is included as a final event so an order whose detail list is empty still
+      // yields a status; its timestamp is the read time, which is honest ("as of now it is X").
+      const summaryStatus = shopeeTrackingStatus(response.response?.logistics_status);
+      if (summaryStatus !== null && !events.some((event) => event.status === summaryStatus)) {
+        events.push({
+          status: summaryStatus,
+          occurredAt: new Date().toISOString(),
+          description: response.response?.logistics_status ?? ""
+        });
+      }
+      return { externalOrderId, events };
+    } catch (error) {
+      throw toPlatformError(error, "fetchChannelTracking");
+    }
   }
 
   webhookHandlers(): Readonly<Record<string, WebhookHandler>> {
@@ -646,9 +885,17 @@ export class ShopeeConnector implements ChannelConnector {
       supportsListingRead: true,
       // `get_model_list` carries `stock_info_v2`, so a snapshot is a real read (docs/adr/0015).
       supportsStockSnapshotRead: true,
-      // `ship_order`'s correct shape is channel-dependent and needs `get_shipping_parameter` first;
-      // see `attachTrackingNumber` and M7 known limits (docs/adr/0020).
-      supportsTrackingWriteBack: false
+      // `ship_order` writes the waybill back; the shape is channel-dependent and is resolved by
+      // `getShippingArrangementParameters` first (docs/adr/0020, corrected by ADR 0021).
+      supportsTrackingWriteBack: true,
+      // Shopee is the logistics orchestrator for its orders: `get_shipping_parameter`, `ship_order`
+      // and `get_tracking_number` are the arrangement (docs/adr/0021). The courier is fixed on the
+      // order before shipping, so `options` is empty and the shape is what matters.
+      supportsShippingArrangement: true,
+      // `create_shipping_document` + `download_shipping_document` produce the printable label.
+      supportsShippingLabel: true,
+      // `get_tracking_info` reports `logistics_status` plus events (docs/adr/0021).
+      supportsChannelTracking: true
     };
   }
 

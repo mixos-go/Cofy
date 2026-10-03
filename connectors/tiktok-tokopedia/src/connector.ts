@@ -23,17 +23,26 @@
 
 import { PlatformError } from "@platform/contracts";
 import type {
+  ArrangedShipment,
   ChannelListing,
   ChannelListingVariant,
   ChannelOrder,
   ChannelOrderLine,
   ChannelOrderTotals,
+  ChannelShippingOption,
   ChannelStockLevel,
+  ChannelTrackingPage,
   Cursor,
   Instant,
   Page,
+  ServiceLevel,
+  ShipmentStatus,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel,
   StockResult,
   StockUpdate,
+  TrackingEvent,
   TrackingWriteBack
 } from "@platform/contracts";
 import type {
@@ -54,7 +63,17 @@ import { assertIdr, decimalToMinor, epochSecondsToInstant } from "./money.ts";
 import type { TikTokOrder, TikTokOrderDetailResponse, TikTokOrderSearchResponse } from "./order-schema.ts";
 import { lineQuantity } from "./order-schema.ts";
 import { TikTokShop, buildAuthUrl, exchangeAuthCode, refreshAccessToken } from "./vendor/tiktok-shop-sdk.ts";
-import type { GetOrderListBody, SearchProductsBody, TokenResponse, UpdateShippingInfoResponse } from "./vendor/tiktok-shop-sdk.ts";
+import type {
+  CreatePackagesResponse,
+  GetEligibleShippingServiceResponse,
+  GetOrderListBody,
+  GetPackageShippingDocumentResponse,
+  GetTrackingResponse,
+  SearchProductsBody,
+  ShipPackageResponse,
+  TokenResponse,
+  UpdateShippingInfoResponse
+} from "./vendor/tiktok-shop-sdk.ts";
 
 /** Cursor payload. Opaque to the caller; only this connector may interpret it (contract doc). */
 interface TikTokCursor {
@@ -85,6 +104,83 @@ function normalizeCode(code: number | string | undefined): number | undefined {
   if (code === undefined) return undefined;
   const parsed = typeof code === "number" ? code : Number(code);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/**
+ * Map TikTok's `shipping_type` onto our neutral `ServiceLevel` (docs/adr/0021).
+ *
+ * TikTok names its services `STANDARD`/`EXPRESS`/`ECONOMY`; anything else is `regular`, which is the
+ * honest default rather than an invented tier. The raw name is kept on the option's `courier` field
+ * via the service name, so no information is lost.
+ */
+function tiktokServiceLevel(shippingType: string | undefined): ServiceLevel {
+  switch ((shippingType ?? "").toUpperCase()) {
+    case "EXPRESS":
+      return "express";
+    case "ECONOMY":
+      return "cargo";
+    default:
+      return "regular";
+  }
+}
+
+/** Parse TikTok's decimal price string into IDR minor units, or null when absent/unparseable. */
+function tiktokPriceMinor(price: string | undefined): { amount: number; currency: "IDR" } | null {
+  if (price === undefined || price === "") return null;
+  const parsed = Number(price);
+  if (Number.isNaN(parsed)) return null;
+  return { amount: Math.round(parsed * 100), currency: "IDR" };
+}
+
+/**
+ * Map TikTok's package/tracking status onto our neutral `ShipmentStatus` (docs/adr/0021).
+ *
+ * The values come from the tracking payload's `status`/`description`; an unknown value is skipped
+ * (returns null) rather than guessed, so the pull path never invents a state TikTok did not report.
+ */
+function tiktokTrackingStatus(raw: unknown): ShipmentStatus | null {
+  if (typeof raw !== "string") return null;
+  switch (raw.toUpperCase()) {
+    case "IN_TRANSIT":
+    case "SHIPPED":
+    case "DISPATCHED":
+      return "in_transit";
+    case "DELIVERED":
+      return "delivered";
+    case "DELIVERY_FAILED":
+    case "FAILED":
+      return "failed";
+    case "RETURNED":
+    case "RETURN":
+      return "returned";
+    case "CANCELLED":
+    case "CANCELED":
+      return "cancelled";
+    case "OUT_FOR_DELIVERY":
+      return "out_for_delivery";
+    case "COLLECTED":
+    case "PICKED_UP":
+      return "picked_up";
+    default:
+      return null;
+  }
+}
+
+/**
+ * The first package id on an order detail, or null.
+ *
+ * TikTok addresses packages, not orders, for the label and shipping calls, and the order detail is
+ * where the package id lives (`line_items[].package_id`, the same field `order-schema.ts` maps). An
+ * order with no package has not been arranged yet, which is a real state and not an error here.
+ */
+function readPackageId(detail: TikTokOrderDetailResponse): string | null {
+  for (const order of detail.data?.orders ?? []) {
+    for (const line of order.line_items ?? []) {
+      const packageId = line.package_id;
+      if (typeof packageId === "string" && packageId !== "") return packageId;
+    }
+  }
+  return null;
 }
 
 export class TikTokConnector implements ChannelConnector {
@@ -377,6 +473,239 @@ export class TikTokConnector implements ChannelConnector {
     }
   }
 
+  /**
+   * The couriers TikTok offers for an order (docs/adr/0021).
+   *
+   * `getEligibleShippingService` answers with the services this order may use, each carrying its own
+   * id, provider name and delivery window. TikTok returns them as free-form objects, so every field
+   * is read defensively: a service without an id is skipped rather than emitted with an empty
+   * handle, because `arrangeShipment` could not address it.
+   */
+  async getShippingArrangementParameters(
+    externalOrderId: string,
+    credential: Credential
+  ): Promise<ShippingArrangementParameters> {
+    const client = this.clientFor(credential);
+    try {
+      const response = (await client.fulfillment.getEligibleShippingService({
+        order_id: externalOrderId
+      })) as GetEligibleShippingServiceResponse;
+      assertSuccess(response, "getShippingArrangementParameters/getEligibleShippingService");
+
+      const options: ChannelShippingOption[] = [];
+      for (const raw of response.data?.shipping_services ?? []) {
+        const id = raw["id"];
+        if (typeof id !== "string" || id === "") continue;
+        const providerName = raw["shipping_provider_name"];
+        const name = raw["name"];
+        const courier =
+          typeof providerName === "string" && providerName !== ""
+            ? providerName
+            : typeof name === "string" && name !== ""
+              ? name
+              : "TikTok Shop logistics";
+        const earliest = raw["earliest_delivery_days"];
+        const latest = raw["latest_delivery_days"];
+        options.push({
+          channelOptionId: id,
+          courier,
+          serviceLevel: tiktokServiceLevel(typeof raw["shipping_type"] === "string" ? raw["shipping_type"] : undefined),
+          price: tiktokPriceMinor(typeof raw["price"] === "string" ? raw["price"] : undefined),
+          estimatedDays:
+            typeof earliest === "number" && typeof latest === "number"
+              ? { min: earliest, max: latest }
+              : null
+        });
+      }
+
+      // TikTok decides pickup vs dropoff per shop, not per order here; the caller learns which from
+      // the handover timeslots, which this read does not fetch. Both are reported false so the
+      // caller does not assume a shape it was not told.
+      return {
+        externalOrderId,
+        options,
+        requiresPickup: false,
+        requiresDropoff: false,
+        pickupAddressIds: []
+      };
+    } catch (error) {
+      throw toPlatformError(error, "getShippingArrangementParameters");
+    }
+  }
+
+  /**
+   * Have TikTok book the shipment, or record the seller's own waybill (docs/adr/0021).
+   *
+   * Two shapes, chosen by the request. Self-arranged: `markPackageAsShipped` records the seller's
+   * waybill directly against the order, which is the verified shape. Channel-arranged:
+   * `createPackages` mints a package for the chosen service, `shipPackage` books it, and the waybill
+   * is read from the shipping response or `getTracking` afterwards. The channel-arranged branch is
+   * built against the official OAS but not yet confirmed against a live shop (recorded in
+   * docs/PLAN.md): its handover method and pickup slot may need a value this connector does not yet
+   * send, and a rejection surfaces as an error rather than being guessed at.
+   */
+  async arrangeShipment(
+    request: ShippingArrangementRequest,
+    credential: Credential
+  ): Promise<ArrangedShipment> {
+    const client = this.clientFor(credential);
+    const externalOrderId = request.externalOrderId;
+
+    if (request.selfShipTrackingNumber !== null) {
+      try {
+        const response = (await client.fulfillment.markPackageAsShipped(
+          { order_id: externalOrderId },
+          { tracking_number: request.selfShipTrackingNumber }
+        )) as CreatePackagesResponse;
+        assertSuccess(response, "arrangeShipment/markPackageAsShipped");
+        return {
+          externalOrderId,
+          trackingNumber: request.selfShipTrackingNumber,
+          status: "created",
+          arrangedAt: new Date().toISOString()
+        };
+      } catch (error) {
+        throw toPlatformError(error, "arrangeShipment");
+      }
+    }
+
+    if (request.channelOptionId === null) {
+      throw new PlatformError(
+        "VALIDATION_FAILED",
+        `arrangeShipment needs either a channel option or a self-ship waybill (order ${externalOrderId}).`
+      );
+    }
+
+    try {
+      const created = (await client.fulfillment.createPackages(
+        {},
+        { order_id: externalOrderId, shipping_service_id: request.channelOptionId }
+      )) as CreatePackagesResponse;
+      assertSuccess(created, "arrangeShipment/createPackages");
+      const packageId = created.data?.package_id;
+      if (packageId === undefined || packageId === "") {
+        throw new PlatformError("UPSTREAM_ERROR", `TikTok created no package for ${externalOrderId}.`);
+      }
+
+      const shipped = (await client.fulfillment.shipPackage({ package_id: packageId })) as ShipPackageResponse;
+      assertSuccess(shipped, "arrangeShipment/shipPackage");
+
+      let trackingNumber =
+        typeof shipped.data?.["tracking_number"] === "string" ? (shipped.data["tracking_number"] as string) : null;
+      if (trackingNumber === null) {
+        const tracking = (await client.fulfillment.getTracking({ order_id: externalOrderId })) as GetTrackingResponse;
+        assertSuccess(tracking, "arrangeShipment/getTracking");
+        for (const entry of tracking.data?.tracking ?? []) {
+          const value = entry["tracking_number"];
+          if (typeof value === "string" && value !== "") {
+            trackingNumber = value;
+            break;
+          }
+        }
+      }
+      if (trackingNumber === null || trackingNumber === "") {
+        throw new PlatformError(
+          "UPSTREAM_ERROR",
+          `TikTok accepted the shipment for ${externalOrderId} but returned no tracking number.`
+        );
+      }
+
+      return {
+        externalOrderId,
+        trackingNumber,
+        status: "created",
+        arrangedAt: new Date().toISOString()
+      };
+    } catch (error) {
+      throw toPlatformError(error, "arrangeShipment");
+    }
+  }
+
+  /**
+   * The printable label for a package TikTok arranged (docs/adr/0021).
+   *
+   * `getPackageShippingDocument` addresses a package, so the order's package is resolved first: the
+   * order detail carries `line_items[].package_id`, which is what `getPackageDetail` and the
+   * document call need. TikTok answers with a `doc_url`, so `url` is set and `inlineBase64` is null —
+   * the opposite of Shopee, which returns the bytes.
+   */
+  async fetchShippingLabel(externalOrderId: string, credential: Credential): Promise<ShippingLabel> {
+    const client = this.clientFor(credential);
+    const documentType = "SHIPPING_LABEL";
+    try {
+      const detail = (await client.order.getOrderDetail({
+        ids: [externalOrderId]
+      })) as TikTokOrderDetailResponse;
+      assertSuccess(detail, "fetchShippingLabel/getOrderDetail");
+      const packageId = readPackageId(detail);
+      if (packageId === null) {
+        throw new PlatformError(
+          "UPSTREAM_ERROR",
+          `TikTok returned no package for order ${externalOrderId}; arrange the shipment before fetching its label.`
+        );
+      }
+
+      const response = (await client.fulfillment.getPackageShippingDocument({
+        package_id: packageId,
+        document_type: documentType,
+        document_format: "PDF"
+      })) as GetPackageShippingDocumentResponse;
+      assertSuccess(response, "fetchShippingLabel/getPackageShippingDocument");
+
+      const url = response.data?.doc_url;
+      if (typeof url !== "string" || url === "") {
+        throw new PlatformError("UPSTREAM_ERROR", `TikTok returned no shipping label for ${externalOrderId}.`);
+      }
+      return {
+        externalOrderId,
+        url,
+        inlineBase64: null,
+        format: "pdf",
+        documentType
+      };
+    } catch (error) {
+      throw toPlatformError(error, "fetchShippingLabel");
+    }
+  }
+
+  /**
+   * TikTok's tracking events for an order it arranged (docs/adr/0021).
+   *
+   * `getTracking` returns free-form entries; each is read for a status and a timestamp. An entry
+   * without a recognisable status is skipped, so the pull path never invents a state.
+   */
+  async fetchChannelTracking(externalOrderId: string, credential: Credential): Promise<ChannelTrackingPage> {
+    const client = this.clientFor(credential);
+    try {
+      const response = (await client.fulfillment.getTracking({
+        order_id: externalOrderId
+      })) as GetTrackingResponse;
+      assertSuccess(response, "fetchChannelTracking/getTracking");
+
+      const events: TrackingEvent[] = [];
+      for (const entry of response.data?.tracking ?? []) {
+        const status = tiktokTrackingStatus(entry["status"] ?? entry["logistics_status"]);
+        if (status === null) continue;
+        const occurredAtRaw = entry["update_time"] ?? entry["update_time_ms"] ?? entry["time"];
+        const occurredAt =
+          typeof occurredAtRaw === "number"
+            ? occurredAtRaw > 1e12
+              ? new Date(occurredAtRaw).toISOString()
+              : epochSecondsToInstant(occurredAtRaw)
+            : new Date().toISOString();
+        const description = entry["description"] ?? entry["status"] ?? "";
+        events.push({
+          status,
+          occurredAt,
+          description: typeof description === "string" ? description : ""
+        });
+      }
+      return { externalOrderId, events };
+    } catch (error) {
+      throw toPlatformError(error, "fetchChannelTracking");
+    }
+  }
+
   async pushStock(items: readonly StockUpdate[], credential: Credential): Promise<readonly StockResult[]> {
     const client = this.clientFor(credential);
     const results: StockResult[] = [];
@@ -611,7 +940,15 @@ export class TikTokConnector implements ChannelConnector {
       supportsStockSnapshotRead: true,
       // Implemented against `fulfillment/updateShippingInfo` and proven by the contract test; see
       // `attachTrackingNumber` for the shipping-provider-id gap (docs/adr/0020).
-      supportsTrackingWriteBack: true
+      supportsTrackingWriteBack: true,
+      // TikTok orchestrates logistics for its orders: `getEligibleShippingService` offers the
+      // couriers, `createPackages`+`shipPackage` book, `markPackageAsShipped` records a self-ship
+      // waybill (docs/adr/0021). The channel-arranged branch awaits live-shop confirmation.
+      supportsShippingArrangement: true,
+      // `getPackageShippingDocument` produces `SHIPPING_LABEL` as a PDF `doc_url`.
+      supportsShippingLabel: true,
+      // `getTracking` reports events for an arranged order (docs/adr/0021).
+      supportsChannelTracking: true
     };
   }
 

@@ -335,7 +335,7 @@ test("a 5xx becomes a retryable upstream error and a 401 does not", async () => 
   );
 });
 
-test("capabilities advertise the implemented listing read and stock push", () => {
+test("capabilities advertise the implemented listing read, stock push and shipping arrangement", () => {
   const connector = new ShopeeConnector(makeConfig(transport([{}]).fetch));
   const capabilities = connector.capabilities();
 
@@ -347,7 +347,10 @@ test("capabilities advertise the implemented listing read and stock push", () =>
     splitsOrderHistory: false,
     supportsListingRead: true,
     supportsStockSnapshotRead: true,
-    supportsTrackingWriteBack: false
+    supportsTrackingWriteBack: true,
+    supportsShippingArrangement: true,
+    supportsShippingLabel: true,
+    supportsChannelTracking: true
   });
 });
 
@@ -523,17 +526,133 @@ test("acknowledgeOrder fails loudly because the channel has no such operation", 
   );
 });
 
-test("attachTrackingNumber refuses loudly while Shopee's write-back shape is unresolved", async () => {
-  // The capability is `false`; the method must throw rather than no-op, so a caller cannot mistake
-  // silence for a written waybill. See the connector comment and M7 known limits.
-  const { fetch: fetchImpl, urls } = transport([{ error: "", response: {} }]);
+test("attachTrackingNumber books the shipment with the self-ship waybill", async () => {
+  const { fetch: fetchImpl, urls } = transport([{ error: "", message: "", request_id: "r1" }]);
   const connector = new ShopeeConnector(makeConfig(fetchImpl));
 
-  await assert.rejects(
-    () => connector.attachTrackingNumber("201214JAJXU6G7", { trackingNumber: "JX1", trackingUrl: null }, credential),
-    (error: unknown) => error instanceof PlatformError && error.code === "VALIDATION_FAILED"
+  await connector.attachTrackingNumber(
+    "201214JAJXU6G7",
+    { trackingNumber: "JX1", trackingUrl: null },
+    credential
   );
-  assert.equal(urls.length, 0);
+
+  assert.equal(urls.length, 1);
+  assert.match(urls[0] ?? "", /logistics\/ship_order/);
+});
+
+test("getShippingArrangementParameters reads info_needed and the shop's pickup addresses", async () => {
+  const { fetch: fetchImpl, urls } = transport([
+    {
+      error: "",
+      response: {
+        info_needed: { pickup: ["address_id"], dropoff: [] },
+        pickup: {
+          address_list: [
+            { address_id: 9001, city: "Jakarta" },
+            { address_id: 9002, city: "Bandung" }
+          ]
+        }
+      }
+    }
+  ]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const parameters = await connector.getShippingArrangementParameters("201214JAJXU6G7", credential);
+
+  assert.match(urls[0] ?? "", /logistics\/get_shipping_parameter/);
+  assert.equal(parameters.externalOrderId, "201214JAJXU6G7");
+  assert.equal(parameters.requiresPickup, true);
+  assert.equal(parameters.requiresDropoff, false);
+  assert.deepEqual(parameters.pickupAddressIds, ["9001", "9002"]);
+  // Shopee fixes the courier on the order before shipping, so there is no per-order choice.
+  assert.deepEqual(parameters.options, []);
+});
+
+test("arrangeShipment books, then reads the marketplace-issued waybill back", async () => {
+  const { fetch: fetchImpl, urls } = transport([
+    { error: "", message: "", request_id: "r1" }, // ship_order
+    { error: "", response: { tracking_number: "SPXID123456" } } // get_tracking_number
+  ]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const shipment = await connector.arrangeShipment(
+    {
+      externalOrderId: "201214JAJXU6G7",
+      channelOptionId: null,
+      pickupAddressId: "9001",
+      selfShipTrackingNumber: null
+    },
+    credential
+  );
+
+  assert.match(urls[0] ?? "", /logistics\/ship_order/);
+  assert.match(urls[1] ?? "", /logistics\/get_tracking_number/);
+  assert.equal(shipment.trackingNumber, "SPXID123456");
+  assert.equal(shipment.status, "created");
+});
+
+test("arrangeShipment keeps the seller's own waybill for a self-arranged shipment", async () => {
+  const { fetch: fetchImpl, urls } = transport([{ error: "", message: "", request_id: "r1" }]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const shipment = await connector.arrangeShipment(
+    {
+      externalOrderId: "201214JAJXU6G7",
+      channelOptionId: null,
+      pickupAddressId: null,
+      selfShipTrackingNumber: "JX-SELLER-1"
+    },
+    credential
+  );
+
+  // Only `ship_order` is called; the seller's waybill is already known, so there is nothing to read.
+  assert.equal(urls.length, 1);
+  assert.match(urls[0] ?? "", /logistics\/ship_order/);
+  assert.equal(shipment.trackingNumber, "JX-SELLER-1");
+});
+
+test("fetchShippingLabel creates then downloads the document and returns the bytes", async () => {
+  const { fetch: fetchImpl, urls } = transport([
+    { error: "", response: { result_list: [{ order_sn: "201214JAJXU6G7" }] } }, // create
+    { waybill: "JVBERi0xLjQK" } // download
+  ]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const label = await connector.fetchShippingLabel("201214JAJXU6G7", credential);
+
+  assert.match(urls[0] ?? "", /logistics\/create_shipping_document/);
+  assert.match(urls[1] ?? "", /logistics\/download_shipping_document/);
+  // Shopee returns the file inline; a URL is not what it gives.
+  assert.equal(label.url, null);
+  assert.equal(label.inlineBase64, "JVBERi0xLjQK");
+  assert.equal(label.format, "pdf");
+});
+
+test("fetchChannelTracking normalises logistics_status into neutral events", async () => {
+  const { fetch: fetchImpl, urls } = transport([
+    {
+      error: "",
+      response: {
+        order_sn: "201214JAJXU6G7",
+        logistics_status: "LOGISTICS_DELIVERY_DONE",
+        tracking_info: [
+          { update_time: 1608271872, description: "Picked up", logistics_status: "LOGISTICS_PICKUP_DONE" },
+          { update_time: 1608272000, description: "Delivered", logistics_status: "LOGISTICS_DELIVERY_DONE" }
+        ]
+      }
+    }
+  ]);
+  const connector = new ShopeeConnector(makeConfig(fetchImpl));
+
+  const page = await connector.fetchChannelTracking("201214JAJXU6G7", credential);
+
+  assert.match(urls[0] ?? "", /logistics\/get_tracking_info/);
+  assert.deepEqual(
+    page.events.map((event) => event.status),
+    ["picked_up", "delivered"]
+  );
+  // An unrecognised status is skipped, never guessed.
+  assert.equal(page.events.every((event) => event.occurredAt !== ""), true);
 });
 
 test("bench begin and complete authorization produce a usable URL and credential", async () => {

@@ -17,6 +17,13 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import type { ChannelCapabilities, ChannelConnector, Credential } from "@platform/channel-sdk";
 import type { ChannelListing, ChannelOrder, ChannelStockLevel, Cursor, Page, TrackingWriteBack } from "@platform/contracts";
+import type {
+  ArrangedShipment,
+  ChannelTrackingPage,
+  ShippingArrangementParameters,
+  ShippingArrangementRequest,
+  ShippingLabel
+} from "@platform/contracts";
 import { RateLimitedError } from "@platform/contracts";
 import { RateLimitGovernor } from "@platform/rate-governor";
 import { createLogger } from "@platform/observability";
@@ -144,6 +151,59 @@ class RecordingConnector implements ChannelConnector {
     this.trackingWrites += 1;
     this.lastTrackingWrite = { externalOrderId, tracking };
   }
+  arrangementCapable = false;
+  labelCapable = false;
+  channelTrackingCapable = false;
+  /** What the arrangement methods were given, so a test can prove the route passed them through. */
+  lastArrangement: ShippingArrangementRequest | null = null;
+  lastLabelOrder: string | null = null;
+  lastChannelTrackingOrder: string | null = null;
+
+  async getShippingArrangementParameters(
+    externalOrderId: string
+  ): Promise<ShippingArrangementParameters> {
+    return {
+      externalOrderId,
+      options: [
+        {
+          channelOptionId: "opt-1",
+          courier: "J&T Express",
+          serviceLevel: "regular" as const,
+          price: { amount: 1500000, currency: "IDR" as const },
+          estimatedDays: { min: 1, max: 3 }
+        }
+      ],
+      requiresPickup: true,
+      requiresDropoff: false,
+      pickupAddressIds: ["addr-1"]
+    };
+  }
+  async arrangeShipment(request: ShippingArrangementRequest): Promise<ArrangedShipment> {
+    this.lastArrangement = request;
+    return {
+      externalOrderId: request.externalOrderId,
+      trackingNumber: request.selfShipTrackingNumber ?? "SPXID-CHANNEL-ISSUED",
+      status: "created" as const,
+      arrangedAt: "2026-09-26T00:00:00.000Z"
+    };
+  }
+  async fetchShippingLabel(externalOrderId: string): Promise<ShippingLabel> {
+    this.lastLabelOrder = externalOrderId;
+    return {
+      externalOrderId,
+      url: "https://label.example.test/x.pdf",
+      inlineBase64: null,
+      format: "pdf" as const,
+      documentType: "SHIPPING_LABEL"
+    };
+  }
+  async fetchChannelTracking(externalOrderId: string): Promise<ChannelTrackingPage> {
+    this.lastChannelTrackingOrder = externalOrderId;
+    return {
+      externalOrderId,
+      events: [{ status: "in_transit" as const, occurredAt: "2026-09-26T00:00:00.000Z", description: "Departed" }]
+    };
+  }
   capabilities(): ChannelCapabilities {
     return {
       supportsOrderPull: true,
@@ -153,7 +213,10 @@ class RecordingConnector implements ChannelConnector {
       splitsOrderHistory: true,
       supportsListingRead: true,
       supportsStockSnapshotRead: this.snapshotCapable,
-      supportsTrackingWriteBack: this.trackingCapable
+      supportsTrackingWriteBack: this.trackingCapable,
+      supportsShippingArrangement: this.arrangementCapable,
+      supportsShippingLabel: this.labelCapable,
+      supportsChannelTracking: this.channelTrackingCapable
     };
   }
 }
@@ -902,6 +965,124 @@ test("the tracking route defaults a missing trackingUrl to null", async () => {
 
     assert.equal(response.status, 200);
     assert.deepEqual(h.connector.lastTrackingWrite?.tracking, { trackingNumber: "JX1", trackingUrl: null });
+  } finally {
+    await h.close();
+  }
+});
+
+test("the arrangement route returns the channel's options through the connector", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.arrangementCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/shipping-arrangement`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1" })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { parameters: { options: unknown[]; requiresPickup: boolean } };
+    assert.equal(body.parameters.options.length, 1);
+    assert.equal(body.parameters.requiresPickup, true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the arrange route books through the connector and returns the waybill", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.arrangementCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/shipping-arrangement/arrange`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({
+        tenantId: "tnt-a",
+        externalOrderId: "ext-1",
+        channelOptionId: "opt-1",
+        pickupAddressId: "addr-1"
+      })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { shipment: { trackingNumber: string } };
+    assert.equal(body.shipment.trackingNumber, "SPXID-CHANNEL-ISSUED");
+    assert.deepEqual(h.connector.lastArrangement, {
+      externalOrderId: "ext-1",
+      channelOptionId: "opt-1",
+      pickupAddressId: "addr-1",
+      selfShipTrackingNumber: null
+    });
+  } finally {
+    await h.close();
+  }
+});
+
+test("the arrangement routes refuse a channel that cannot arrange shipments", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.arrangementCapable = false;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/shipping-arrangement`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1" })
+    });
+
+    assert.equal(response.status, 422);
+    assert.equal(h.connector.lastArrangement, null);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the label route returns the document and refuses a channel without labels", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.labelCapable = true;
+
+    const ok = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/shipping-label`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1" })
+    });
+    assert.equal(ok.status, 200);
+    assert.equal(h.connector.lastLabelOrder, "ext-1");
+
+    h.connector.labelCapable = false;
+    const refused = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/shipping-label`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1" })
+    });
+    assert.equal(refused.status, 422);
+  } finally {
+    await h.close();
+  }
+});
+
+test("the channel-tracking route returns normalised events", async () => {
+  const h = await startHarness();
+  try {
+    await connect(h);
+    h.connector.channelTrackingCapable = true;
+
+    const response = await fetch(`${h.baseUrl}/v1/channels/tiktok_tokopedia/channel-tracking`, {
+      method: "POST",
+      headers: serviceHeaders(),
+      body: JSON.stringify({ tenantId: "tnt-a", externalOrderId: "ext-1" })
+    });
+
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { tracking: { events: Array<{ status: string }> } };
+    assert.equal(body.tracking.events[0]?.status, "in_transit");
+    assert.equal(h.connector.lastChannelTrackingOrder, "ext-1");
   } finally {
     await h.close();
   }

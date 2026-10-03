@@ -98,7 +98,10 @@ test("a channel without write-back is skipped, not failed", async () => {
     splitsOrderHistory: false,
     supportsListingRead: true,
     supportsStockSnapshotRead: true,
-    supportsTrackingWriteBack: false
+    supportsTrackingWriteBack: false,
+    supportsShippingArrangement: false,
+    supportsShippingLabel: false,
+    supportsChannelTracking: false
   });
 
   const outcome = await writeBackTrackingOnce(h.context, {

@@ -144,6 +144,23 @@ const trackingWriteBackBody = z.object({
   trackingUrl: z.string().url().max(1024).nullable().default(null)
 });
 
+/**
+ * A seller's arrangement choice (docs/adr/0021). Exactly one of `channelOptionId` /
+ * `selfShipTrackingNumber` is set; the connector refuses a request that names neither.
+ */
+const shippingArrangementBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  externalOrderId: z.string().min(1).max(128),
+  channelOptionId: z.string().min(1).max(256).nullable().default(null),
+  pickupAddressId: z.string().min(1).max(128).nullable().default(null),
+  selfShipTrackingNumber: z.string().min(1).max(128).nullable().default(null)
+});
+
+const orderRefBody = z.object({
+  tenantId: z.string().min(1).max(64),
+  externalOrderId: z.string().min(1).max(128)
+});
+
 /** Load the credential for a tenant and channel, or fail as disconnected. */
 async function credentialFor(
   options: IntegrationPlaneOptions,
@@ -167,6 +184,9 @@ async function requireCapability(
     | "supportsStockPush"
     | "supportsStockSnapshotRead"
     | "supportsTrackingWriteBack"
+    | "supportsShippingArrangement"
+    | "supportsShippingLabel"
+    | "supportsChannelTracking"
 ): Promise<void> {
   // A connector declares what it can do (AGENTS.md §4). Calling past a `false` would either throw
   // from the connector or, worse, look like an empty success; refusing here makes it a clear error.
@@ -522,6 +542,94 @@ export function createRoutes(
           )
         );
         return { written: true, channel, externalOrderId: parsed.externalOrderId };
+      }
+    },
+    {
+      // The channel's arrangement options for an order, or the shape it needs (docs/adr/0021). The
+      // primary fulfillment path: the marketplace owns the courier, so this is how the seller learns
+      // what it may choose before booking.
+      method: "POST",
+      path: "/v1/channels/:channel/shipping-arrangement",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = orderRefBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsShippingArrangement");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const parameters = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.getShippingArrangementParameters(parsed.externalOrderId, credential)
+        );
+        return { parameters };
+      }
+    },
+    {
+      // Book the shipment with the channel, or record the seller's own waybill (docs/adr/0021).
+      // Gated on `supportsShippingArrangement`; the channel decides the shape from its own
+      // parameters, so the caller sends exactly one of the two choices.
+      method: "POST",
+      path: "/v1/channels/:channel/shipping-arrangement/arrange",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = shippingArrangementBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsShippingArrangement");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const shipment = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.arrangeShipment(
+            {
+              externalOrderId: parsed.externalOrderId,
+              channelOptionId: parsed.channelOptionId,
+              pickupAddressId: parsed.pickupAddressId,
+              selfShipTrackingNumber: parsed.selfShipTrackingNumber
+            },
+            credential
+          )
+        );
+        return { shipment };
+      }
+    },
+    {
+      // The printable label for a shipment the channel arranged (docs/adr/0021). Gated on
+      // `supportsShippingLabel`, separately from arrangement, because a channel can arrange without
+      // exposing a document.
+      method: "POST",
+      path: "/v1/channels/:channel/shipping-label",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = orderRefBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsShippingLabel");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const label = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.fetchShippingLabel(parsed.externalOrderId, credential)
+        );
+        return { label };
+      }
+    },
+    {
+      // The channel's tracking events for an order it arranged (docs/adr/0021), the source of the
+      // delivery-status pull path for a channel-arranged shipment. Gated on
+      // `supportsChannelTracking`.
+      method: "POST",
+      path: "/v1/channels/:channel/channel-tracking",
+      auth: { kind: "service" },
+      handler: async ({ params, body }) => {
+        const parsed = orderRefBody.parse(body);
+        const channel = channelParam(params);
+        const connector = registry.require(channel);
+        await requireCapability(connector, "supportsChannelTracking");
+
+        const credential = await credentialFor(options, parsed.tenantId, channel);
+        const page = await callChannel(options, channel, parsed.tenantId, () =>
+          connector.fetchChannelTracking(parsed.externalOrderId, credential)
+        );
+        return { tracking: page };
       }
     },
     {
