@@ -35,28 +35,7 @@ import type {
 } from "@platform/contracts";
 import { leaseDeadline } from "@platform/sync-state";
 import type { OrderRefReservation, ReserveOrderRefInput, SyncStateStore } from "@platform/sync-state";
-
-const DEFAULT_SCHEMA = "platform_ops";
-
-/**
- * Platform schema names reach SQL as identifiers, which cannot be parameterised.
- *
- * This is deliberately not `assertSafeSchemaName` from `tenant-client`: that guard requires the
- * `tenant_` prefix, which is right for tenant schemas and wrong for platform bookkeeping. Platform
- * tables live in `platform_ops`, so the rule here is the narrower "a bare lowercase identifier",
- * which still refuses anything that could terminate the identifier and start a new statement.
- */
-const SAFE_PLATFORM_SCHEMA = /^[a-z_][a-z0-9_]{0,62}$/;
-
-function assertSafePlatformSchema(schema: string): void {
-  if (!SAFE_PLATFORM_SCHEMA.test(schema)) {
-    throw new PlatformError(
-      "VALIDATION_FAILED",
-      `Refusing to use an unsafe schema name '${schema}' for platform bookkeeping.`,
-      { details: { schema } }
-    );
-  }
-}
+import { assertSafePlatformSchema, DEFAULT_PLATFORM_SCHEMA } from "./platform-schema.ts";
 
 interface OrderRefRow {
   readonly tenant_id: string;
@@ -163,7 +142,7 @@ export class PostgresSyncStateStore implements SyncStateStore {
   #schemaReady: Promise<void> | null = null;
 
   constructor(connectionString: string, options: PostgresSyncStateStoreOptions = {}) {
-    const schema = options.schema ?? DEFAULT_SCHEMA;
+    const schema = options.schema ?? DEFAULT_PLATFORM_SCHEMA;
     // Rejects anything that is not a bare identifier before it reaches an interpolated DDL string.
     assertSafePlatformSchema(schema);
     this.#schema = schema;

@@ -17,7 +17,13 @@
  */
 
 import { PlatformError } from "@platform/contracts";
-import type { ChannelCode, MedusaTargetStore, TenantId, TenantRecord } from "@platform/contracts";
+import type {
+  ChannelCode,
+  MedusaTargetStore,
+  RateShoppingRulesStore,
+  TenantId,
+  TenantRecord
+} from "@platform/contracts";
 import type { SecretStore, MedusaAdminKeyStore } from "@platform/secrets";
 import { assertTenantTransition } from "./state.ts";
 import type { Logger } from "./logging.ts";
@@ -43,6 +49,12 @@ export interface TenantTerminationOptions {
    */
   readonly medusaAdminKeys?: MedusaAdminKeyStore;
   readonly medusaTargets?: MedusaTargetStore;
+  /**
+   * A terminated tenant's rate-shopping rules (docs/adr/0020). Platform config, so it is not in the
+   * tenant schema the purge drops; without this the rules would outlive the tenant. Optional so a
+   * deployment that predates M7 still terminates.
+   */
+  readonly rateShoppingRules?: RateShoppingRulesStore;
   /** Drops any pooled tenant connections so a terminated tenant cannot keep serving. */
   readonly onTerminated?: (tenantId: TenantId) => Promise<void>;
 }
@@ -55,6 +67,7 @@ export class TenantTerminationService {
   readonly #now: () => string;
   readonly #medusaAdminKeys: MedusaAdminKeyStore | undefined;
   readonly #medusaTargets: MedusaTargetStore | undefined;
+  readonly #rateShoppingRules: RateShoppingRulesStore | undefined;
   readonly #onTerminated: ((tenantId: TenantId) => Promise<void>) | undefined;
 
   constructor(options: TenantTerminationOptions) {
@@ -65,6 +78,7 @@ export class TenantTerminationService {
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#medusaAdminKeys = options.medusaAdminKeys;
     this.#medusaTargets = options.medusaTargets;
+    this.#rateShoppingRules = options.rateShoppingRules;
     this.#onTerminated = options.onTerminated;
   }
 
@@ -88,6 +102,11 @@ export class TenantTerminationService {
     await this.#medusaAdminKeys?.delete(tenantId);
     await this.#medusaTargets?.delete(tenantId);
     if (this.#medusaAdminKeys !== undefined) log.info("termination.medusa_credential_revoked", {});
+
+    // Rate-shopping rules are platform config, not tenant-schema data, so the purge below does not
+    // reach them. Clearing them here is what stops a terminated tenant's shipping policy from
+    // outliving it and being read back by a later tenant that reuses the id.
+    await this.#rateShoppingRules?.delete(tenantId);
 
     const scheduledAt = this.#now();
     await this.#schemaAdmin.scheduleDeletion(tenantId, tenant.schemaName, scheduledAt);

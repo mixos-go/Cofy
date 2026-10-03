@@ -24,6 +24,7 @@ import { TenantTerminationService } from "../src/termination.ts";
 import { TenantRegistry } from "../src/tenants.ts";
 import { createControlPlaneServer } from "../src/http.ts";
 import { InMemoryMedusaTargetStore } from "../src/medusa-target.ts";
+import { InMemoryRateShoppingRulesStore } from "../src/rate-shopping-rules-store.ts";
 import { SellerOrderReader } from "../src/seller-orders.ts";
 import type { SellerReadTransport } from "../src/seller-orders.ts";
 import { HttpChannelConnectionClient } from "../src/channels.ts";
@@ -46,6 +47,8 @@ interface Harness {
   syncState: InMemorySyncStateStore;
   medusaTargets: InMemoryMedusaTargetStore;
   medusaKeys: InMemoryMedusaAdminKeyStore;
+  /** The platform-owned shipping policy, so a test can prove termination clears it. */
+  rateShoppingRules: InMemoryRateShoppingRulesStore;
   /** Replace the tenant-engine transport so a seller read is exercised without a live instance. */
   setSellerTransport: (transport: SellerReadTransport) => void;
   /** Replace the channel-service transport so a connection is exercised without the integration plane. */
@@ -82,11 +85,13 @@ async function startHarness(): Promise<Harness> {
     handlers: createProvisioningHandlers({ schemaAdmin, migrationRunner: migrations, seeder, routes })
   });
 
+  const rateShoppingRules = new InMemoryRateShoppingRulesStore();
   const termination = new TenantTerminationService({
     store,
     secrets: new InMemorySecretStore(),
     schemaAdmin,
     logger,
+    rateShoppingRules,
     now: () => NOW
   });
 
@@ -141,6 +146,7 @@ async function startHarness(): Promise<Harness> {
     sessions,
     syncState,
     medusaTargets,
+    rateShoppingRules,
     serviceTokens: [SERVICE_TOKEN],
     sellerOrders,
     channelConnections,
@@ -159,6 +165,7 @@ async function startHarness(): Promise<Harness> {
     schemaAdmin,
     syncState,
     medusaTargets,
+    rateShoppingRules,
     medusaKeys,
     setSellerTransport: (transport) => {
       sellerTransport = transport;
@@ -1091,6 +1098,72 @@ test("the API", async (t) => {
     assert.equal(called, false, "a malformed body must not reach the tenant");
   });
 
+  await t.test("a seller can save and read back its rate-shopping rules", async () => {
+    // Before anything is saved the tenant gets the default: no constraints, cheapest first. That is
+    // what `selectCourier` will be handed, so "unset" and "no rules" must be the same answer.
+    const initial = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    assert.equal(initial.status, 200);
+    const initialBody = (await initial.json()) as { rules: { strategy: string; allowedCouriers: string[] } };
+    assert.equal(initialBody.rules.strategy, "cheapest");
+    assert.deepEqual(initialBody.rules.allowedCouriers, []);
+
+    const saved = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        allowedCouriers: ["jne", "sicepat"],
+        allowedServiceLevels: ["regular"],
+        maxPrice: { amount: 25_000, currency: "IDR" },
+        maxEstimatedDays: 4,
+        requiresInsurance: false,
+        requiresCod: true,
+        strategy: "preferred",
+        preferredCouriers: ["sicepat", "jne"]
+      })
+    });
+    assert.equal(saved.status, 200);
+    const savedBody = (await saved.json()) as { rules: { strategy: string; preferredCouriers: string[] } };
+    assert.equal(savedBody.rules.strategy, "preferred");
+    assert.deepEqual(savedBody.rules.preferredCouriers, ["sicepat", "jne"]);
+
+    const reread = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      headers: { authorization: `Bearer ${sellerToken}` }
+    });
+    const rereadBody = (await reread.json()) as { rules: { allowedCouriers: string[]; requiresCod: boolean } };
+    assert.deepEqual(rereadBody.rules.allowedCouriers, ["jne", "sicepat"]);
+    assert.equal(rereadBody.rules.requiresCod, true);
+  });
+
+  await t.test("a rate-shopping rule naming an unknown courier is 422", async () => {
+    // The rule reaches `selectCourier`, which would otherwise reject every quote for a courier the
+    // seller never wrote. Validating at the boundary keeps that a request error, not a shipping
+    // failure discovered later.
+    const response = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "cheapest", allowedCouriers: ["not-a-courier"] })
+    });
+    assert.equal(response.status, 422);
+  });
+
+  await t.test("a viewer may read rate-shopping rules but not change them", async () => {
+    const viewerToken = await login(harness.baseUrl, "viewer@example.com", GOOD_PASSWORD);
+
+    const read = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      headers: { authorization: `Bearer ${viewerToken}` }
+    });
+    assert.equal(read.status, 200, "a viewer may read the shipping policy");
+
+    const write = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${viewerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "fastest" })
+    });
+    assert.equal(write.status, 403, "a viewer may not change the shipping policy");
+  });
+
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {
     const response = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}`, {
       method: "DELETE",
@@ -1106,6 +1179,11 @@ test("the API", async (t) => {
     });
     const healthBody = (await health.json()) as { servable: boolean };
     assert.equal(healthBody.servable, false);
+
+    // Termination clears the platform-owned shipping policy too. It is not in the tenant schema the
+    // purge drops, so without this the rules would outlive the tenant.
+    const cleared = await harness.rateShoppingRules.get(tenantId as never);
+    assert.equal(cleared.updatedAt, new Date(0).toISOString());
   });
 
   await t.test("the sync-state surface requires a service token", async () => {

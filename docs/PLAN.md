@@ -30,7 +30,7 @@ This file is the **single source of truth for what we are building next**.
 | M4 | Reconciliation & drift repair | In progress — engine wired; order and stock drift classification/repair done; restart resume proven on real Redis; retention remains | M3 |
 | M5 | Seller OMS UI & operator console | Done — channel connection, seller screens, and the audited operator console are delivered | M3 |
 | M6 | WMS core (inbound, pick, pack, stocktake) | Complete | M5 |
-| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping, the courier provider surface, the channel tracking write-back and the tenant-side shipment write path are delivered; real providers, the shipment-create workflow and delivery-status sync remain | M6 |
+| M7 | Fulfillment providers (local couriers) | In progress — ADR 0020 (Accepted), courier boundary, auditable rate shopping (rule + tenant rules store), the courier provider surface, the channel tracking write-back and the tenant-side shipment write path are delivered; real providers, the shipment-create workflow and delivery-status sync remain | M6 |
 | M8 | Multi-channel expansion (Shopee, Lazada) | In progress (Shopee done early, ahead of M8) | M4 |
 
 E0 is a prerequisite track (see below), not a milestone: the production egress decision and the
@@ -817,10 +817,13 @@ gains `attachTrackingNumber` and a `supportsTrackingWriteBack` capability, the p
 `/v1/channels/:channel/tracking`, and the worker runs a `shipment.write_back` unit. The tenant-side
 half is built too: `CommerceClient.recordShipment` posts to a data-plane route that runs
 `recordShipmentWorkflow`, turning "order X shipped with waybill Y" into the engine's own Fulfillment
-(consuming the reservation) plus the shipment that carries the label, idempotent on the waybill. A
-real courier provider is blocked on sourcing a courier SDK (ADR 0007's vendoring rule); the courier
-surface is proven with in-test providers. The exit criteria are still unticked: they need a real
-provider, the shipment-create workflow that joins a courier to a channel order, and the UI.
+(consuming the reservation) plus the shipment that carries the label, idempotent on the waybill. The
+tenant's rate-shopping rules are now stored as ADR 0020 places them: with the control-plane tenant
+record, in the platform's `platform_ops` schema, read and written over
+`/v1/seller/rate-shopping-rules` and cleared on termination. A real courier provider is blocked on
+sourcing a courier SDK (ADR 0007's vendoring rule); the courier surface is proven with in-test
+providers. The exit criteria are still unticked: they need a real provider, the shipment-create
+workflow that joins a courier to a channel order, and the UI.
 
 **Deliverables**
 
@@ -831,9 +834,12 @@ provider, the shipment-create workflow that joins a courier to a channel order, 
   `selectCourier` in `packages/contracts`: it applies the tenant's hard constraints, applies the
   chosen strategy, breaks ties deterministically, and returns the chosen quote plus the reason every
   other quote lost — the audit is the return value, so it cannot drift from the decision. Evidence:
-  `packages/contracts/test/rate-shopping.test.ts`. The plane's quote fan-out feeds it the quotes and
-  books the chosen one — `apps/services/integration-plane/test/couriers.test.ts`. Wiring it into a
-  shipment workflow is next.)*
+  `packages/contracts/test/rate-shopping.test.ts`. The rules themselves are now stored, as ADR 0020
+  places them: `RateShoppingRulesStore` keeps them with the control-plane tenant record in the
+  platform's `platform_ops` schema, read and written over `/v1/seller/rate-shopping-rules` and
+  cleared on termination. The plane's quote fan-out feeds `selectCourier` the quotes and books the
+  chosen one — `apps/services/integration-plane/test/couriers.test.ts`. Wiring it into a shipment
+  workflow is next.)*
 - Tracking number write-back to the channel. *(Delivered: `ChannelConnector.attachTrackingNumber`
   plus `supportsTrackingWriteBack` (ADR 0020's approved extension), the plane route
   `/v1/channels/:channel/tracking`, and the worker `shipment.write_back` unit. TikTok Shop implements
@@ -865,7 +871,12 @@ provider, the shipment-create workflow that joins a courier to a channel order, 
       no-qualifying-quote case returning an actionable reason. The audit is the function's return
       value (`selectCourier`), not a log line beside it. The plane proves the loop closes: the quote
       `selectCourier` chose is the exact service `createShipment` books
-      (`apps/services/integration-plane/test/couriers.test.ts`).)*
+      (`apps/services/integration-plane/test/couriers.test.ts`). The rules are tenant-owned and
+      stored: `/v1/seller/rate-shopping-rules` reads and writes them, a viewer may read but not
+      change them, an unknown courier is a 422, and termination clears them —
+      `apps/services/control-plane/test/http.test.ts`. The Postgres store is proven against a real
+      database, not only in memory:
+      `apps/services/control-plane/test/integration/rate-shopping-rules-store.test.ts`.)*
 
 **Non-goals**
 

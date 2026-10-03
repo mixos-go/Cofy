@@ -7,7 +7,7 @@
  */
 
 import { Pool } from "pg";
-import type { MedusaTargetStore, TenantId } from "@platform/contracts";
+import type { MedusaTargetStore, RateShoppingRulesStore, TenantId } from "@platform/contracts";
 import { InMemorySecretStore, InMemoryMedusaAdminKeyStore } from "@platform/secrets";
 import type { SecretStore, MedusaAdminKeyStore } from "@platform/secrets";
 import { createLogger } from "./logging.ts";
@@ -29,6 +29,10 @@ import { TenantClient } from "@platform/tenant-client";
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import type { SyncStateStore } from "@platform/sync-state";
 import { PostgresSyncStateStore } from "./sync-state-store.ts";
+import {
+  InMemoryRateShoppingRulesStore,
+  PostgresRateShoppingRulesStore
+} from "./rate-shopping-rules-store.ts";
 import { InMemoryMedusaTargetStore } from "./medusa-target.ts";
 import { medusaAdminProvisionerFromEnv } from "./medusa-provisioner.ts";
 import { SellerOrderReader } from "./seller-orders.ts";
@@ -112,6 +116,15 @@ async function main(): Promise<void> {
     })
   });
 
+  // Tenant rate-shopping rules (docs/adr/0020). Platform config about how a seller ships, so it
+  // lives beside the registry like the sync state and not in a tenant schema. Selected the same way
+  // the sync-state store is: Postgres whenever the registry database is configured, the in-memory
+  // adapter otherwise so the service stays startable with no infrastructure.
+  const rateShoppingRules: RateShoppingRulesStore =
+    databaseUrl !== undefined && databaseUrl !== ""
+      ? new PostgresRateShoppingRulesStore(databaseUrl)
+      : new InMemoryRateShoppingRulesStore();
+
   const termination = new TenantTerminationService({
     store,
     secrets,
@@ -119,6 +132,7 @@ async function main(): Promise<void> {
     logger,
     medusaAdminKeys,
     medusaTargets,
+    rateShoppingRules,
     onTerminated: (tenantId) => tenantClient.evict(tenantId)
   });
 
@@ -188,6 +202,7 @@ async function main(): Promise<void> {
     sessions,
     syncState,
     medusaTargets,
+    rateShoppingRules,
     serviceTokens,
     sellerOrders,
     channelConnections,

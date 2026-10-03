@@ -10,6 +10,7 @@ export * from "./state.ts";
 export * from "./logging.ts";
 export * from "./tenant-store.ts";
 export * from "./sync-state-store.ts";
+export * from "./rate-shopping-rules-store.ts";
 export * from "./tenant-schema.ts";
 export * from "./migrations.ts";
 export * from "./provisioning.ts";

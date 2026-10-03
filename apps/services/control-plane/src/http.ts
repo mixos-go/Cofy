@@ -19,8 +19,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
-import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, CHANNEL_CODES, asChannelCode } from "@platform/contracts";
-import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, Session, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
+import { PlatformError, httpStatusFor, DEFAULT_STALE_RESERVATION_MS, SYNC_ENTITIES, CHANNEL_CODES, COURIER_CODES, SERVICE_LEVELS, RATE_SHOPPING_STRATEGIES, asChannelCode } from "@platform/contracts";
+import type { Capability, ChannelCode, ChannelOrderRefStatus, MedusaTargetStore, RateShoppingRules, RateShoppingRulesStore, Session, TenantId, TenantPlan, RegionCode, SyncEntity } from "@platform/contracts";
 import type { SyncStateStore } from "@platform/sync-state";
 import type { Logger } from "./logging.ts";
 import type { SessionManager } from "./identity.ts";
@@ -209,6 +209,25 @@ const cursorBody = z.object({
   cursor: z.string().max(4000).nullable()
 });
 
+/**
+ * A tenant's rate-shopping rules (docs/adr/0020).
+ *
+ * The lists and bounds mirror `RateShoppingRules` in `@platform/contracts`. They are validated here
+ * as well as typed there because the request body arrives from outside (AGENTS.md §5): a rule that
+ * named an unknown courier or a negative cap would otherwise reach `selectCourier` and reject every
+ * quote for a reason the seller never wrote. Empty lists mean "any", exactly as the contract says.
+ */
+const rateShoppingRulesBody = z.object({
+  allowedCouriers: z.array(z.enum(COURIER_CODES)).max(COURIER_CODES.length).default([]),
+  allowedServiceLevels: z.array(z.enum(SERVICE_LEVELS)).max(SERVICE_LEVELS.length).default([]),
+  maxPrice: z.object({ amount: z.number().int().nonnegative(), currency: z.literal("IDR") }).nullable().default(null),
+  maxEstimatedDays: z.number().int().positive().nullable().default(null),
+  requiresInsurance: z.boolean().default(false),
+  requiresCod: z.boolean().default(false),
+  strategy: z.enum(RATE_SHOPPING_STRATEGIES),
+  preferredCouriers: z.array(z.enum(COURIER_CODES)).max(COURIER_CODES.length).default([])
+});
+
 export interface ControlPlaneApiOptions {
   readonly registry: TenantRegistry;
   readonly provisioning: ProvisioningOrchestrator;
@@ -218,6 +237,12 @@ export interface ControlPlaneApiOptions {
   readonly syncState: SyncStateStore;
   /** tenant → Medusa target (ADR 0012). Non-secret; the admin key is read from the secret store. */
   readonly medusaTargets: MedusaTargetStore;
+  /**
+   * Tenant rate-shopping rules (docs/adr/0020). Platform config about how a seller ships, so it
+   * lives with the tenant record rather than in the tenant data plane; the worker reads it before a
+   * shipment-create walk and the seller writes it from the settings screen.
+   */
+  readonly rateShoppingRules: RateShoppingRulesStore;
   /** Bearer tokens the worker presents. Empty means the sync-state surface is closed. */
   readonly serviceTokens: readonly string[];
   /** Seller-facing commerce reads (ADR 0016). Reads the tenant's engine; stores nothing. */
@@ -863,6 +888,58 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
           correlationId
         });
         return { stocktake };
+      }
+    },
+
+    // --- Rate-shopping rules (docs/PLAN.md M7, docs/adr/0020). Platform config about *how this
+    // seller ships*, so it lives with the tenant record and not in the tenant's engine. Reading is
+    // a tenant-level read; writing is a tenant-level setting, so it takes `tenant:update`, which a
+    // `seller_viewer` does not hold — seeing the rules must not imply the ability to change them. ---
+    {
+      method: "GET",
+      path: "/v1/seller/rate-shopping-rules",
+      auth: { kind: "session", capability: "tenant:read", scope: "self" },
+      handler: async ({ tenantId }) => {
+        const tenant = sellerTenant(tenantId, "read rate-shopping rules");
+        return options.rateShoppingRules.get(tenant);
+      }
+    },
+    {
+      // POST, not PUT: the route table's method union is `GET | POST | DELETE`, and every other
+      // write on this surface is a POST. The body is the whole rules document either way, so the
+      // semantics are the same and there is no method to add to the union.
+      method: "POST",
+      path: "/v1/seller/rate-shopping-rules",
+      auth: { kind: "session", capability: "tenant:update", scope: "self" },
+      handler: async ({ tenantId, body, correlationId }) => {
+        const parsed = rateShoppingRulesBody.parse(body);
+        const tenant = sellerTenant(tenantId, "update rate-shopping rules");
+        // Normalised through the contract's own field set: the zod schema defaults every optional
+        // member, so what is stored is a complete `RateShoppingRules`, not a partial the reader
+        // would have to re-default. `selectCourier` reads it as-is, so an unset list must already
+        // be `[]` here rather than a missing key.
+        const rules: RateShoppingRules = {
+          allowedCouriers: parsed.allowedCouriers,
+          allowedServiceLevels: parsed.allowedServiceLevels,
+          maxPrice: parsed.maxPrice,
+          maxEstimatedDays: parsed.maxEstimatedDays,
+          requiresInsurance: parsed.requiresInsurance,
+          requiresCod: parsed.requiresCod,
+          strategy: parsed.strategy,
+          preferredCouriers: parsed.preferredCouriers
+        };
+        const stored = await options.rateShoppingRules.set({
+          tenantId: tenant,
+          rules,
+          now: new Date().toISOString()
+        });
+        options.logger.info("rate_shopping_rules.updated", {
+          tenantId: tenant,
+          strategy: rules.strategy,
+          allowedCouriers: rules.allowedCouriers.length,
+          correlationId
+        });
+        return stored;
       }
     },
 

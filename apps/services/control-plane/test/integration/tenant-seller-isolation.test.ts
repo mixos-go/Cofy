@@ -53,6 +53,7 @@ import {
   createProvisioningHandlers
 } from "@platform/control-plane";
 import { InMemoryMedusaTargetStore } from "../../src/medusa-target.ts";
+import { InMemoryRateShoppingRulesStore } from "../../src/rate-shopping-rules-store.ts";
 import { InMemoryMedusaAdminKeyStore, InMemorySecretStore } from "@platform/secrets";
 import { InMemorySyncStateStore } from "@platform/sync-state";
 import type { ChannelCode, TenantId } from "@platform/contracts";
@@ -420,6 +421,7 @@ test(
       sessions,
       syncState,
       medusaTargets: targets,
+      rateShoppingRules: new InMemoryRateShoppingRulesStore(),
       serviceTokens: [],
       sellerOrders,
       channelConnections,

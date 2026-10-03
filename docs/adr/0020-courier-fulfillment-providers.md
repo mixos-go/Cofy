@@ -20,6 +20,14 @@
 > that carries the waybill. It is idempotent on the waybill — a retry converges on the first
 > fulfillment rather than fulfilling the items twice — and is proven end to end against a real Medusa
 > HTTP server (`apps/services/control-plane/test/integration/shipment-write-path.test.ts`).
+>
+> M7 increment 4 made the "with the control plane's tenant record" part of the decision real:
+> `RateShoppingRulesStore` (in-memory and Postgres) stores a tenant's rules in the platform's own
+> `platform_ops` schema as one `jsonb` document per tenant, the seller surface reads and writes them
+> over `/v1/seller/rate-shopping-rules`, and termination clears them so a terminated tenant's
+> shipping policy does not outlive it. The platform-schema name guard moved to one shared helper
+> (`platform-schema.ts`) so this store and the sync-state store cannot disagree about what a safe
+> schema name is.
 
 ## Context
 

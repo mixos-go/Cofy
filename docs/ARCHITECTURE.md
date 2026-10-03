@@ -175,6 +175,14 @@ in the `platform_ops` schema beside the tenant deletion schedule. Both stores ar
 conformance suite (`packages/sync-state/testing`), so a rule that holds in tests also holds on the
 database.
 
+A tenant's rate-shopping rules (ADR 0020) are platform config of the same kind — how the seller
+ships, not commerce data — so `RateShoppingRulesStore`
+(`apps/services/control-plane/src/rate-shopping-rules-store.ts`) keeps them in `platform_ops` too,
+one `jsonb` document per tenant. The schema name guard is shared
+(`apps/services/control-plane/src/platform-schema.ts`) so this store and the sync-state store cannot
+disagree about what a safe schema name is. The rules are read and written by the seller over
+`/v1/seller/rate-shopping-rules` and cleared when a tenant is terminated.
+
 ## 3. Key flows
 
 ### 3.1 Seller connects a shop
