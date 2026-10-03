@@ -35,7 +35,13 @@ import {
 } from "@platform/workflow-queue/bullmq";
 import { createWorkflowHandlers } from "../../src/units.ts";
 import { InMemoryEventPublisher } from "../../src/events.ts";
-import { FakeChannelGateway, FakeCommerceClient, syncStateClient } from "../fakes.ts";
+import {
+  FakeChannelGateway,
+  FakeCommerceClient,
+  FakeCourierGateway,
+  FakeRateShoppingRulesClient,
+  syncStateClient
+} from "../fakes.ts";
 
 const REDIS_URL = process.env.TEST_REDIS_URL;
 /**
@@ -131,6 +137,8 @@ if (REDIS_URL === undefined) {
       syncState: syncStateClient(store),
       gateway,
       commerce,
+      couriers: new FakeCourierGateway(),
+      rateShoppingRules: new FakeRateShoppingRulesClient(),
       events: new InMemoryEventPublisher(silent),
       logger: silent,
       queue: producer,

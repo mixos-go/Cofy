@@ -24,7 +24,9 @@ import {
 import {
   HttpChannelGateway,
   HttpCommerceClient,
+  HttpCourierGateway,
   HttpMedusaTargetResolver,
+  HttpRateShoppingRulesClient,
   HttpSyncStateClient
 } from "./ports.ts";
 import { createTlsTransport, readOptionalCa } from "@platform/http-transport";
@@ -116,6 +118,18 @@ async function main(): Promise<void> {
     baseUrl: process.env.INTEGRATION_PLANE_BASE_URL ?? "http://127.0.0.1:4002",
     serviceToken: readToken("INTEGRATION_SERVICE_TOKENS").split(",")[0]?.trim() ?? ""
   });
+  // The courier surface lives on the same plane as the marketplace surface, so it shares the same
+  // base URL and service token (docs/adr/0020).
+  const couriers = new HttpCourierGateway({
+    baseUrl: process.env.INTEGRATION_PLANE_BASE_URL ?? "http://127.0.0.1:4002",
+    serviceToken: readToken("INTEGRATION_SERVICE_TOKENS").split(",")[0]?.trim() ?? ""
+  });
+  // Rate-shopping rules are platform config stored with the control-plane tenant record, so this is
+  // a control-plane read, not a tenant-engine one (docs/adr/0020).
+  const rateShoppingRules = new HttpRateShoppingRulesClient({
+    baseUrl: process.env.CONTROL_PLANE_BASE_URL ?? "http://127.0.0.1:4001",
+    serviceToken: readToken("CONTROL_PLANE_SERVICE_TOKENS").split(",")[0]?.trim() ?? ""
+  });
   const commerce = new HttpCommerceClient({
     resolver: new HttpMedusaTargetResolver({
       controlPlane,
@@ -168,6 +182,8 @@ async function main(): Promise<void> {
     syncState: controlPlane,
     gateway,
     commerce,
+    couriers,
+    rateShoppingRules,
     events: new InMemoryEventPublisher(logger),
     logger,
     queue,

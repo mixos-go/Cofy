@@ -1133,6 +1133,19 @@ export function createRoutes(options: ControlPlaneApiOptions): readonly Route[] 
         }
         return { target };
       }
+    },
+
+    // --- Worker-facing rate-shopping rules (docs/PLAN.md M7, docs/adr/0020). Service-token auth,
+    // because the shipment-create workflow needs the tenant's rules before it can call
+    // `selectCourier`; the seller writes the same record over the session route above. Read-only
+    // here: a worker never changes a seller's shipping policy. Absence is the default, not an
+    // error — `get` answers the default for a tenant that never saved rules, so the worker does
+    // not have to special-case a fresh tenant. ---
+    {
+      method: "GET",
+      path: "/v1/tenants/:tenantId/rate-shopping-rules",
+      auth: { kind: "service" },
+      handler: async ({ params }) => options.rateShoppingRules.get(params.tenantId ?? "")
     }
   ];
 }

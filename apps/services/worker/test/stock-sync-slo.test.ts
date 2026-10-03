@@ -28,7 +28,13 @@ import { InMemoryWorkflowQueue, dispatchJob } from "@platform/workflow-queue";
 import type { WorkflowJob } from "@platform/workflow-queue";
 import { createWorkflowHandlers } from "../src/units.ts";
 import { importListingsOnce } from "../src/listing-import.ts";
-import { FakeChannelGateway, FakeCommerceClient, syncStateClient } from "./fakes.ts";
+import {
+  FakeChannelGateway,
+  FakeCommerceClient,
+  FakeCourierGateway,
+  FakeRateShoppingRulesClient,
+  syncStateClient
+} from "./fakes.ts";
 import { InMemoryEventPublisher } from "../src/events.ts";
 
 const TENANT = "tnt-a";
@@ -48,6 +54,8 @@ function harness(intervalSeconds = CADENCE_AT_SLO) {
     syncState: syncStateClient(store),
     gateway,
     commerce,
+    couriers: new FakeCourierGateway(),
+    rateShoppingRules: new FakeRateShoppingRulesClient(),
     events,
     logger: silent,
     queue,

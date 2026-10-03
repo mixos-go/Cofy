@@ -25,7 +25,13 @@ import type { WorkflowJob } from "@platform/workflow-queue";
 import { createWorkflowHandlers } from "../src/units.ts";
 import { deferralFor, MIN_DEFERRAL_MS } from "../src/rate-limit.ts";
 import { importListingsOnce } from "../src/listing-import.ts";
-import { FakeChannelGateway, FakeCommerceClient, syncStateClient } from "./fakes.ts";
+import {
+  FakeChannelGateway,
+  FakeCommerceClient,
+  FakeCourierGateway,
+  FakeRateShoppingRulesClient,
+  syncStateClient
+} from "./fakes.ts";
 import { InMemoryEventPublisher } from "../src/events.ts";
 
 const TENANT = "tnt-a";
@@ -64,12 +70,16 @@ function harness() {
   const store = new InMemorySyncStateStore();
   const gateway = new FakeChannelGateway();
   const commerce = new FakeCommerceClient();
+  const couriers = new FakeCourierGateway();
+  const rules = new FakeRateShoppingRulesClient();
   const events = new InMemoryEventPublisher();
   const queue = new InMemoryWorkflowQueue({ now: () => NOW.toISOString() });
   const handlers = createWorkflowHandlers({
     syncState: syncStateClient(store),
     gateway,
     commerce,
+    couriers,
+    rateShoppingRules: rules,
     events,
     logger: silent,
     queue,
@@ -78,7 +88,7 @@ function harness() {
     maxRefsPerPass: 500,
     now: () => NOW
   });
-  return { store, gateway, commerce, events, queue, handlers };
+  return { store, gateway, commerce, couriers, rules, events, queue, handlers };
 }
 
 function job(overrides: Partial<WorkflowJob> = {}): WorkflowJob {
@@ -130,6 +140,113 @@ test("a unit whose channel is missing is failed, not run against a guessed chann
   const outcome = await dispatchJob(job({ channel: null }), h.handlers, h.queue, silent);
   assert.equal(outcome.result, "failed");
   assert.equal(h.commerce.orders.length, 0);
+});
+
+test("a shipment.create job books, records and queues the channel write-back", async () => {
+  // This is the M7 join end to end at the dispatch boundary: one job books a courier shipment, the
+  // tenant's engine records the Fulfillment, and a shipment.write_back job is queued (not called
+  // inline) so the channel write is governed like every other outbound call.
+  const h = harness();
+  h.couriers.withQuotes("jne", [
+    {
+      courier: "jne",
+      serviceLevel: "regular",
+      price: { amount: 18_000, currency: "IDR" },
+      estimatedDays: { min: 1, max: 3 },
+      supportsInsurance: true,
+      supportsCod: true,
+      providerQuoteId: "jne-regular"
+    }
+  ]);
+  h.commerce.withVariant("SKU-1", "var-1", 5);
+
+  const outcome = await dispatchJob(
+    job({
+      unit: "shipment.create",
+      payload: {
+        orderId: "order-001",
+        externalOrderId: "ext-1",
+        items: [{ sku: "SKU-1", quantity: 1 }],
+        shipment: {
+          destination: { city: "Jakarta", postalCode: "10110", address: "Jl. Merdeka 1" },
+          weightGrams: 1_000,
+          declaredValue: { amount: 150_000, currency: "IDR" },
+          requiresInsurance: false,
+          requiresCod: false
+        }
+      }
+    }),
+    h.handlers,
+    h.queue,
+    silent
+  );
+
+  assert.equal(outcome.result, "completed");
+  assert.equal(h.couriers.createCalls.length, 1, "the chosen quote was booked");
+  assert.equal(h.commerce.shipments.length, 1, "the tenant's engine recorded the shipment");
+  assert.equal(h.commerce.shipments[0]?.orderId, "order-001");
+
+  // The write-back is queued, not performed by this unit.
+  const queued = await h.queue.take(NOW.toISOString());
+  assert.equal(queued?.unit, "shipment.write_back");
+  assert.equal(queued?.payload.externalOrderId, "ext-1");
+  assert.equal(queued?.payload.trackingNumber, "WAYBILL-0001");
+
+  // Running the queued unit actually tells the channel.
+  const writeBack = await dispatchJob(queued as WorkflowJob, h.handlers, h.queue, silent);
+  assert.equal(writeBack.result, "completed");
+  assert.equal(h.gateway.trackingWrites.length, 1);
+  assert.equal(h.gateway.trackingWrites[0]?.externalOrderId, "ext-1");
+});
+
+test("a shipment.create that finds no qualifying quote queues no write-back", async () => {
+  const h = harness();
+  h.couriers.withQuotes("jne", [
+    {
+      courier: "jne",
+      serviceLevel: "regular",
+      price: { amount: 90_000, currency: "IDR" },
+      estimatedDays: { min: 1, max: 3 },
+      supportsInsurance: true,
+      supportsCod: true,
+      providerQuoteId: "jne-regular"
+    }
+  ]);
+  h.rules.withRules(TENANT, {
+    allowedCouriers: [],
+    allowedServiceLevels: [],
+    maxPrice: { amount: 25_000, currency: "IDR" },
+    maxEstimatedDays: null,
+    requiresInsurance: false,
+    requiresCod: false,
+    strategy: "cheapest",
+    preferredCouriers: []
+  });
+
+  const outcome = await dispatchJob(
+    job({
+      unit: "shipment.create",
+      payload: {
+        orderId: "order-001",
+        externalOrderId: "ext-1",
+        items: [{ sku: "SKU-1", quantity: 1 }],
+        shipment: {
+          destination: { city: "Jakarta", postalCode: "10110", address: "Jl. Merdeka 1" },
+          weightGrams: 1_000,
+          declaredValue: { amount: 150_000, currency: "IDR" },
+          requiresInsurance: false,
+          requiresCod: false
+        }
+      }
+    }),
+    h.handlers,
+    h.queue,
+    silent
+  );
+
+  assert.equal(outcome.result, "completed");
+  assert.equal(h.commerce.shipments.length, 0);
+  assert.equal(await h.queue.take(NOW.toISOString()), null, "nothing to write back when nothing shipped");
 });
 
 test("a malformed payload is failed rather than silently ignored", async () => {

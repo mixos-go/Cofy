@@ -1164,6 +1164,37 @@ test("the API", async (t) => {
     assert.equal(write.status, 403, "a viewer may not change the shipping policy");
   });
 
+  await t.test("the worker reads a tenant's rate-shopping rules with a service token", async () => {
+    // The shipment-create workflow needs the rules before it can call `selectCourier`, and the worker
+    // has no seller session. So the same record the seller writes is readable over the service-token
+    // surface; a seller session must not reach it, and an unauthenticated call must not either.
+    const saved = await fetch(`${harness.baseUrl}/v1/seller/rate-shopping-rules`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${sellerToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ strategy: "fastest", allowedCouriers: ["jnt"] })
+    });
+    assert.equal(saved.status, 200);
+
+    const read = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}/rate-shopping-rules`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(read.status, 200);
+    const body = (await read.json()) as { rules: { strategy: string; allowedCouriers: string[] } };
+    assert.equal(body.rules.strategy, "fastest");
+    assert.deepEqual(body.rules.allowedCouriers, ["jnt"]);
+
+    // A fresh tenant gets the default rather than a 404: absence and "no rules" are the same answer.
+    const fresh = await fetch(`${harness.baseUrl}/v1/tenants/tenant-fresh/rate-shopping-rules`, {
+      headers: { authorization: `Bearer ${SERVICE_TOKEN}` }
+    });
+    assert.equal(fresh.status, 200);
+    const freshBody = (await fresh.json()) as { rules: { strategy: string } };
+    assert.equal(freshBody.rules.strategy, "cheapest");
+
+    const withoutToken = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}/rate-shopping-rules`);
+    assert.equal(withoutToken.status, 401);
+  });
+
   await t.test("terminating a tenant marks it terminated and it stops being servable", async () => {
     const response = await fetch(`${harness.baseUrl}/v1/tenants/${tenantId}`, {
       method: "DELETE",

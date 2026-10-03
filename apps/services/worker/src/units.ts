@@ -20,7 +20,7 @@
  */
 
 import { z } from "zod";
-import { PlatformError } from "@platform/contracts";
+import { PlatformError, COURIER_CODES } from "@platform/contracts";
 import type { ChannelCode } from "@platform/contracts";
 import type { Logger } from "@platform/observability";
 import type {
@@ -34,18 +34,27 @@ import { importListingsOnce } from "./listing-import.ts";
 import { importOrdersOnce } from "./order-import.ts";
 import type { EventPublisher } from "./order-import.ts";
 import { pushStockOnce } from "./stock-push.ts";
+import { createShipmentOnce } from "./shipment-create.ts";
 import { writeBackTrackingOnce } from "./tracking-writeback.ts";
 import { repairDrift } from "./drift.ts";
 import { reconcileStockOnce } from "./stock-reconcile.ts";
 import { deferralFor } from "./rate-limit.ts";
 import { reArmedJobId } from "./reconcile.ts";
-import type { ChannelGateway, CommerceClient, SyncStateClient } from "./ports.ts";
+import type {
+  ChannelGateway,
+  CommerceClient,
+  CourierGateway,
+  RateShoppingRulesClient,
+  SyncStateClient
+} from "./ports.ts";
 
 /** Everything the units need. The engine supplies the queue; these come from `main.ts`. */
 export interface WorkflowDependencies {
   readonly syncState: SyncStateClient;
   readonly gateway: ChannelGateway;
   readonly commerce: CommerceClient;
+  readonly couriers: CourierGateway;
+  readonly rateShoppingRules: RateShoppingRulesClient;
   readonly events: EventPublisher;
   readonly logger: Logger;
   /** The engine, so a unit can re-arm itself. Only the reconciliation unit uses it. */
@@ -97,6 +106,38 @@ const trackingWriteBackPayload = z
   .strict();
 
 const emptyPayload = z.object({}).strict();
+
+/**
+ * A shipment-create job (docs/PLAN.md M7, docs/adr/0020).
+ *
+ * It carries everything the workflow needs to quote, choose and book without reading any tenant
+ * order state: the tenant's own order id (what `recordShipment` addresses), the channel's external
+ * order id (what the queued write-back addresses — the two ids are different systems), the lines to
+ * ship (by SKU), and the courier-neutral shipment request. `couriers` narrows the fan-out; absent
+ * means every registered courier. The channel is in the envelope, because the write-back this
+ * triggers is a channel call.
+ */
+const shipmentCreatePayload = z
+  .object({
+    orderId: z.string().min(1).max(128),
+    externalOrderId: z.string().min(1).max(128),
+    items: z
+      .array(z.object({ sku: z.string().min(1), quantity: z.number().int().positive() }))
+      .min(1),
+    shipment: z.object({
+      destination: z.object({
+        city: z.string().min(1).max(128),
+        postalCode: z.string().min(1).max(16).nullable().default(null),
+        address: z.string().min(1).max(512)
+      }),
+      weightGrams: z.number().int().positive(),
+      declaredValue: z.object({ amount: z.number().int().nonnegative(), currency: z.literal("IDR") }),
+      requiresInsurance: z.boolean().default(false),
+      requiresCod: z.boolean().default(false)
+    }),
+    couriers: z.array(z.enum(COURIER_CODES)).max(16).optional()
+  })
+  .strict();
 
 /** Pulls are addressed by the envelope; a job without a channel cannot be routed to a marketplace. */
 function requireChannel(job: WorkflowJob): ChannelCode {
@@ -152,6 +193,8 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
     syncState,
     gateway,
     commerce,
+    couriers,
+    rateShoppingRules,
     events,
     logger,
     queue,
@@ -229,6 +272,46 @@ export function createWorkflowHandlers(dependencies: WorkflowDependencies): Work
       });
     },
 
+    // Booking a courier shipment (docs/PLAN.md M7, docs/adr/0020). Quotes across couriers, applies
+    // the tenant's stored rules with the pure `selectCourier`, books the chosen quote, records the
+    // tenant-side Fulfillment, then *queues* the tracking write-back rather than calling it inline:
+    // the channel write is a governed outbound marketplace call and belongs to its own unit, so a
+    // throttle on it cannot roll back a booking that already happened. The write-back is only queued
+    // when something was actually booked — nothing to tell the channel about otherwise.
+    "shipment.create": async (job): Promise<WorkflowRunResult> => {
+      const channel = requireChannel(job);
+      return runUnit(job, logger, now, async () => {
+        const parsed = shipmentCreatePayload.parse(job.payload);
+        const outcome = await createShipmentOnce(
+          { syncState, couriers, rules: rateShoppingRules, commerce, events, logger },
+          {
+            tenantId: job.tenantId,
+            orderId: parsed.orderId,
+            items: parsed.items,
+            shipment: { orderId: parsed.orderId, ...parsed.shipment },
+            ...(parsed.couriers === undefined ? {} : { couriers: parsed.couriers }),
+            now
+          }
+        );
+
+        if (outcome.shipment !== null) {
+          await queue.enqueue("shipment.write_back", job.tenantId, channel, {
+            externalOrderId: parsed.externalOrderId,
+            trackingNumber: outcome.shipment.trackingNumber,
+            trackingUrl: null
+          }, { jobId: `shipment.write_back:${parsed.externalOrderId}:${outcome.shipment.trackingNumber}` });
+        }
+
+        logger.info("unit.shipment.create.completed", {
+          tenantId: job.tenantId,
+          orderId: parsed.orderId,
+          courier: outcome.shipment?.courier ?? null,
+          replayed: outcome.replayed,
+          chosen: outcome.selection.chosen !== null
+        });
+      });
+    },
+
     // Scheduled convergence and drift repair (docs/PLAN.md M4). Deliberately the *same* function the
     // real-time unit calls — `importOrdersOnce` — so repair and real-time import cannot drift into
     // two behaviours (ADR 0002, ADR 0013). The only difference is `retryFailedRefs`, which the
@@ -290,6 +373,7 @@ export const REGISTERED_UNITS: readonly WorkflowUnit[] = [
   "order.import",
   "listing.import",
   "stock.push",
+  "shipment.create",
   "shipment.write_back",
   "reconcile.orders",
   "reconcile.stock"

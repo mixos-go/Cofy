@@ -28,6 +28,15 @@
 > shipping policy does not outlive it. The platform-schema name guard moved to one shared helper
 > (`platform-schema.ts`) so this store and the sync-state store cannot disagree about what a safe
 > schema name is.
+>
+> M7 increment 5 joined the pieces this ADR names into one path: the `shipment.create` workflow
+> (`apps/services/worker/src/shipment-create.ts`) reads the tenant's stored rules over the control
+> plane's service-token surface, fans quotes out through the courier surface, applies the pure
+> `selectCourier`, books the *chosen* quote through `createShipment`, records the tenant-side
+> Fulfillment through `CommerceClient.recordShipment`, and queues `shipment.write_back` instead of
+> calling the channel inline — so the channel write stays capability-gated, governed and idempotent
+> on its own, and a throttle on it cannot roll back a booking that already happened. The selection
+> object is the workflow's return value, so the audit an operator reads is the decision that shipped.
 
 ## Context
 

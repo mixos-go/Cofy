@@ -15,18 +15,25 @@ import type {
   ChannelListing,
   ChannelOrder,
   ChannelStockLevel,
+  CourierCode,
+  RateShoppingRules,
   Shipment,
+  ShipmentQuote,
+  ShipmentRequest,
   StockResult,
   StockUpdate,
   TenantId,
+  TrackingEvent,
   TrackingWriteBack
 } from "@platform/contracts";
-import { PlatformError } from "@platform/contracts";
+import { defaultRateShoppingRules, PlatformError } from "@platform/contracts";
 import type {
   ChannelGateway,
   CommerceClient,
+  CourierGateway,
   MedusaStockLevel,
   MedusaVariant,
+  RateShoppingRulesClient,
   SyncStateClient
 } from "../src/ports.ts";
 
@@ -350,5 +357,95 @@ export class FakeCommerceClient implements CommerceClient {
     this.#shipmentByWaybill.set(waybill, fulfillmentId);
     this.shipments.push({ ...input, items: [...input.items] });
     return { fulfillmentId, trackingNumber: input.shipment.trackingNumber };
+  }
+}
+
+/**
+ * A scripted courier surface (an external boundary, docs/adr/0020).
+ *
+ * Quotes are keyed by courier so a test can script exactly what rate shopping has to choose from.
+ * A per-courier quote failure is injectable, because "one courier is down" must not sink the
+ * fan-out — that is a behaviour the workflow owns and a real courier cannot be asked to produce.
+ */
+export class FakeCourierGateway implements CourierGateway {
+  /** courier -> the service levels it will quote. Absent courier fails to quote. */
+  readonly #quotes = new Map<CourierCode, readonly ShipmentQuote[]>();
+  readonly quoteCalls: { tenantId: TenantId; couriers: readonly CourierCode[] | undefined }[] = [];
+  readonly createCalls: { tenantId: TenantId; quote: ShipmentQuote }[] = [];
+  /** When set, the next create throws this, to exercise the failure and deferral paths. */
+  createError: Error | null = null;
+  #waybillCounter = 0;
+
+  withQuotes(courier: CourierCode, quotes: readonly ShipmentQuote[]): this {
+    this.#quotes.set(courier, quotes);
+    return this;
+  }
+
+  async quote(input: {
+    readonly tenantId: TenantId;
+    readonly shipment: ShipmentRequest;
+    readonly couriers?: readonly CourierCode[];
+  }) {
+    const requested = input.couriers ?? [...this.#quotes.keys()];
+    this.quoteCalls.push({ tenantId: input.tenantId, couriers: input.couriers });
+    const quotes: ShipmentQuote[] = [];
+    const failures: { courier: CourierCode; reason: string }[] = [];
+    for (const courier of requested) {
+      const scripted = this.#quotes.get(courier);
+      if (scripted === undefined) failures.push({ courier, reason: "courier_error" });
+      else quotes.push(...scripted);
+    }
+    return { quotes, failures };
+  }
+
+  async createShipment(input: {
+    readonly tenantId: TenantId;
+    readonly quote: ShipmentQuote;
+    readonly shipment: ShipmentRequest;
+  }): Promise<{ readonly shipment: Shipment }> {
+    if (this.createError !== null) {
+      const error = this.createError;
+      this.createError = null;
+      throw error;
+    }
+    this.createCalls.push({ tenantId: input.tenantId, quote: input.quote });
+    this.#waybillCounter += 1;
+    return {
+      shipment: {
+        courier: input.quote.courier,
+        serviceLevel: input.quote.serviceLevel,
+        trackingNumber: `WAYBILL-${String(this.#waybillCounter).padStart(4, "0")}`,
+        status: "created",
+        createdAt: new Date().toISOString()
+      }
+    };
+  }
+
+  readonly trackingCalls: { tenantId: TenantId; courier: CourierCode; trackingNumber: string }[] = [];
+  trackEvents: readonly TrackingEvent[] = [];
+
+  async track(input: {
+    readonly tenantId: TenantId;
+    readonly courier: CourierCode;
+    readonly trackingNumber: string;
+  }) {
+    this.trackingCalls.push(input);
+    return { events: this.trackEvents };
+  }
+}
+
+/** A scripted rate-shopping rules read. Defaults to the honest "no constraints, cheapest first". */
+export class FakeRateShoppingRulesClient implements RateShoppingRulesClient {
+  readonly #rules = new Map<TenantId, RateShoppingRules>();
+  readonly calls: TenantId[] = [];
+
+  withRules(tenantId: TenantId, rules: RateShoppingRules): this {
+    this.#rules.set(tenantId, rules);
+    return this;
+  }
+
+  async get(input: { readonly tenantId: TenantId }): Promise<RateShoppingRules> {
+    this.calls.push(input.tenantId);
+    return this.#rules.get(input.tenantId) ?? defaultRateShoppingRules();
   }
 }

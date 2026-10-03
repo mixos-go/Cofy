@@ -21,8 +21,13 @@ import type {
   ChannelListing,
   ChannelOrder,
   ChannelStockLevel,
+  CourierCode,
   IdempotencyClaim,
   OrderId,
+  RateShoppingRules,
+  Shipment,
+  ShipmentQuote,
+  ShipmentRequest,
   StockResult,
   StockUpdate,
   SyncEntity,
@@ -30,8 +35,8 @@ import type {
   ChannelSkuMap,
   ChannelOrderRef,
   ChannelOrderRefStatus,
-  TrackingWriteBack,
-  Shipment
+  TrackingEvent,
+  TrackingWriteBack
 } from "@platform/contracts";
 
 /** Platform-owned sync state (ADR 0010). Backed by the control-plane registry. */
@@ -117,6 +122,19 @@ export interface SyncStateClient {
   }): Promise<void>;
 }
 
+/**
+ * Reads a tenant's rate-shopping rules (docs/adr/0020).
+ *
+ * The rules are platform config stored with the control-plane tenant record, so the worker reads
+ * them over the control plane's service-token surface rather than from the tenant's engine. Read
+ * only: a worker never changes a seller's shipping policy, so there is no `set` here by design. The
+ * control plane answers the default for a tenant that has never saved rules, so a fresh tenant and
+ * an unconstrained one are the same answer.
+ */
+export interface RateShoppingRulesClient {
+  get(input: { readonly tenantId: TenantId }): Promise<RateShoppingRules>;
+}
+
 /** One page or one batch against the integration plane. The plane owns the marketplace. */
 export interface ChannelGateway {
   /**
@@ -164,6 +182,49 @@ export interface ChannelGateway {
     readonly externalOrderId: string;
     readonly tracking: TrackingWriteBack;
   }): Promise<void>;
+}
+
+/**
+ * The courier surface of the integration plane (docs/adr/0020).
+ *
+ * A courier is an external boundary like a marketplace, so it is reached the same way: over the
+ * plane's service-token surface, with the governor and the provider on the plane's side. The worker
+ * never calls a courier directly and never knows a courier's raw shapes (AGENTS.md §4).
+ *
+ * `quote` is a fan-out, not a decision: it returns every quote it collected plus the couriers that
+ * failed to answer, and the caller applies `selectCourier` to them. `createShipment` books the exact
+ * quote that was chosen, which is what makes the audit's chosen value the thing that ships.
+ */
+export interface CourierGateway {
+  /**
+   * Price one shipment across the couriers named (or every registered courier when none are).
+   *
+   * A courier that fails is reported in `failures` rather than failing the whole call — one courier
+   * being down must not stop the seller shipping with another. A governor refusal is the exception:
+   * it propagates so the caller reschedules the whole fan-out rather than acting on a partial answer.
+   */
+  quote(input: {
+    readonly tenantId: TenantId;
+    readonly shipment: ShipmentRequest;
+    readonly couriers?: readonly CourierCode[];
+  }): Promise<{
+    readonly quotes: readonly ShipmentQuote[];
+    readonly failures: readonly { readonly courier: CourierCode; readonly reason: string }[];
+  }>;
+
+  /** Book the exact service a quote described, returning the waybill the courier issued. */
+  createShipment(input: {
+    readonly tenantId: TenantId;
+    readonly quote: ShipmentQuote;
+    readonly shipment: ShipmentRequest;
+  }): Promise<{ readonly shipment: Shipment }>;
+
+  /** The tracking events for one shipment, oldest first (the pull-based track pass). */
+  track(input: {
+    readonly tenantId: TenantId;
+    readonly courier: CourierCode;
+    readonly trackingNumber: string;
+  }): Promise<{ readonly events: readonly TrackingEvent[] }>;
 }
 
 /** A sellable variant in the tenant's Medusa, resolved by our own SKU. */
@@ -547,6 +608,83 @@ export class HttpChannelGateway implements ChannelGateway {
       trackingNumber: input.tracking.trackingNumber,
       trackingUrl: input.tracking.trackingUrl
     });
+  }
+}
+
+/** HTTP client for the control plane's rate-shopping rules read (docs/adr/0020). */
+export class HttpRateShoppingRulesClient implements RateShoppingRulesClient {
+  readonly #options: HttpOptions;
+
+  constructor(options: HttpOptions) {
+    this.#options = options;
+  }
+
+  async get(input: { readonly tenantId: TenantId }): Promise<RateShoppingRules> {
+    const transport = this.#options.transport ?? fetch;
+    const url = `${this.#options.baseUrl}/v1/tenants/${encodeURIComponent(input.tenantId)}/rate-shopping-rules`;
+    const body = (await request(transport, url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${this.#options.serviceToken}` }
+    })) as { readonly rules: RateShoppingRules };
+    return body.rules;
+  }
+}
+
+/** HTTP client for the integration plane's courier surface (docs/adr/0020). */
+export class HttpCourierGateway implements CourierGateway {
+  readonly #options: HttpOptions;
+
+  constructor(options: HttpOptions) {
+    this.#options = options;
+  }
+
+  #post(path: string, payload: Record<string, unknown>): Promise<unknown> {
+    const transport = this.#options.transport ?? fetch;
+    return request(transport, `${this.#options.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.#options.serviceToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+  }
+
+  async quote(input: {
+    readonly tenantId: TenantId;
+    readonly shipment: ShipmentRequest;
+    readonly couriers?: readonly CourierCode[];
+  }) {
+    return (await this.#post("/v1/couriers/quotes", {
+      tenantId: input.tenantId,
+      shipment: input.shipment,
+      ...(input.couriers === undefined ? {} : { couriers: input.couriers })
+    })) as {
+      readonly quotes: readonly ShipmentQuote[];
+      readonly failures: readonly { readonly courier: CourierCode; readonly reason: string }[];
+    };
+  }
+
+  async createShipment(input: {
+    readonly tenantId: TenantId;
+    readonly quote: ShipmentQuote;
+    readonly shipment: ShipmentRequest;
+  }) {
+    return (await this.#post(
+      `/v1/couriers/${input.quote.courier}/shipments`,
+      { tenantId: input.tenantId, quote: input.quote, shipment: input.shipment }
+    )) as { readonly shipment: Shipment };
+  }
+
+  async track(input: {
+    readonly tenantId: TenantId;
+    readonly courier: CourierCode;
+    readonly trackingNumber: string;
+  }) {
+    return (await this.#post(`/v1/couriers/${input.courier}/tracking`, {
+      tenantId: input.tenantId,
+      trackingNumber: input.trackingNumber
+    })) as { readonly events: readonly TrackingEvent[] };
   }
 }
 
